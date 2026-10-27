@@ -11,6 +11,7 @@ Exit code 0 = OK, 1 = problems found.
 `--allow-edits` skips only the "no existing line changed" check. It is for a human
 deliberately changing the shared shell (CSS/JS); scheduled runs must never use it.
 """
+import html as htmllib
 import re
 import subprocess
 import sys
@@ -24,6 +25,8 @@ VOID = {"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "met
 # required section ids (suffixes after "<entry-id>-"), in this exact order; entities is optional
 SECTIONS = ["sec-functional", "sec-nonfunctional", "sec-entities", "sec-api", "sec-hld", "sec-deepdives", "sec-tips"]
 OPTIONAL = {"sec-entities"}
+# entries after the longer launch entry follow the tighter budget in CLAUDE.md
+BUDGET_FROM, MAX_WORDS, MAX_DIVES = "2026-10-28", 1000, 3
 errors = []
 
 
@@ -150,6 +153,17 @@ for m in re.finditer(r'<article class="entry" id="([^"]+)".*?</article>', html, 
     n_svg = len(re.findall(r'<svg class="diagram"', body))
     if not 1 <= n_svg <= 3:
         err(f"entry {aid}: has {n_svg} diagrams (need 1-3)")
+    if aid[:10] >= BUDGET_FROM:
+        # same count as the page's read time: lede + prose, minus diagrams, code, tables and Legend
+        text = re.sub(r"<(svg|pre|table|details)\b.*?</\1>", " ", body, flags=re.S)
+        lede = re.search(r'<p class="lede">.*?</p>', text, flags=re.S)
+        prose = text[text.find('<div class="prose">'):]
+        words = len(htmllib.unescape(re.sub(r"<[^>]+>", " ", (lede.group(0) if lede else "") + prose)).split())
+        if words > MAX_WORDS:
+            err(f"entry {aid}: {words} words of prose (max {MAX_WORDS}); do the cut pass in CLAUDE.md")
+        n_dives = len(re.findall(r'<div class="dive\b', body))
+        if n_dives > MAX_DIVES:
+            err(f"entry {aid}: {n_dives} deep dives (max {MAX_DIVES})")
 
 if art_ids != sorted(art_ids, key=lambda x: x[:10], reverse=True):
     err("articles are not newest-first")

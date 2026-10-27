@@ -17,7 +17,7 @@ This repo is one self-contained `index.html` (served by GitHub Pages from `main`
 - Assume the generic scaling answer (identical app servers that keep no data, behind a load balancer, e.g. on EC2). Mention it in one sentence in the high-level design and don't re-argue it.
 - **Legend:** every entry has a collapsible Legend at the top explaining each new or non-obvious term in 1-2 plain sentences, 4-10 terms, ordered by first use. Wrap each term's **first use** in the text with `<dfn class="term" title="short definition">`.
 - **Analogies must earn their place:** use one only if it maps closely to how the system really works. If it half-fits or needs "but unlike..." caveats, drop it. Zero is fine; at most one or two per entry; never one per section.
-- **Length:** roughly 900-1300 words of prose (not counting Legend, code, tables, diagrams), 4-6 minutes. Each deep dive is 2-3 short paragraphs at most.
+- **Length:** 700-1000 words of prose (lede + prose, not counting Legend, code, tables, diagrams), about 3-4 minutes. The validator rejects new entries over 1,000 words. See "Same coverage, less content" below.
 
 ### Required structure (same order, same headings, every entry)
 Modelled on Hello Interview's delivery framework ("System Design in a Hurry"), simplified for juniors.
@@ -27,16 +27,27 @@ Modelled on Hello Interview's delivery framework ("System Design in a Hurry"), s
 3. **Core entities** (`sec-entities`, optional, only if helpful): 2-4 main things stored, one line each.
 4. **API design** (`sec-api`): 2-4 endpoints (method, path, request, response), one per functional requirement.
 5. **High-level design** (`sec-hld`): built up step by step, one functional requirement at a time, simplest version first. Include the simple data model (a `.schema` table), the architecture diagram and a request-flow diagram.
-6. **Deep dives** (`sec-deepdives`): very basic, one per non-functional requirement (or genuinely tricky part), each titled as a question ("How do we keep redirects fast?"). Show 2-3 realistic options as `.options`, mark the chosen one `.pick`, and say why. End the section with the "What you could add next" box (2-4 scaling ideas).
-7. **Interview tips** (`sec-tips`): 3-4 likely follow-ups with one-line answers (`.qa`), 1-2 common junior mistakes (`.mistakes`), and one short `callout tip`.
+6. **Deep dives** (`sec-deepdives`): very basic, 2 of them (3 only at Lv 3), one per non-functional requirement that actually shapes the design (or a genuinely tricky part), each titled as a question ("How do we keep redirects fast?"). Show 2-3 realistic options as `.options`, mark the chosen one `.pick`, and say why. End the section with the "What you could add next" box (2-3 scaling ideas, one line each).
+7. **Interview tips** (`sec-tips`): 3 likely follow-ups with one-line answers (`.qa`), 1-2 common junior mistakes (`.mistakes`), and one short `callout tip`.
 
 - **No upfront back-of-the-envelope section.** Do math only INLINE where it changes a design decision ("100M new URLs a month is about 40 writes a second, which one database handles easily, so no sharding yet"). Round numbers, explain each, double-check the arithmetic, and skip math that doesn't affect a decision.
 - **Diagrams:** 2-3 simple, clearly labelled, animated diagrams per entry (minimum 1, normally an architecture diagram plus a request-flow diagram). Few boxes, plain labels.
 - Use the `callout why` for the key trade-off, and a `callout confidence` where a detail depends on assumptions or where several answers are valid.
 
+### Same coverage, less content
+The goal is the URL shortener entry's quality and coverage with roughly a quarter less text. That launch entry (2026-10-27) is longer than the current budget: copy its markup and its way of breaking the problem down, not its length. Cut words, never steps.
+- **Coverage stays complete:** every functional requirement gets an endpoint and a step in the high-level design; every non-functional requirement that shapes the design is answered by a deep dive or one clear sentence in the design; the key trade-off gets the `callout why`. Nothing in the 7 steps is skipped (only Core entities is optional).
+- **Budget per section** (prose words, roughly): functional 40, non-functional 80, entities 40 (or skip and let the data-model table cover it), API 40 plus the code blocks, high-level design 220 (2-3 sentences per step, one table, one inline math line if it changes a decision), deep dives 280 total, tips 120, confidence note 40 (only if needed).
+- **Deep dive shape:** one sentence on the problem, the options as one line each (what it is, its main pro or con), the pick with a one- or two-sentence why. No extra paragraphs, no second "downside" paragraph unless the interview really needs it.
+- **Say each thing once.** If the API section explains a status code, the design doesn't repeat it; if a callout makes the point, the prose doesn't.
+- **Legend:** 4-8 terms. Fewer new terms is a feature: if a term isn't needed to follow the design, leave it out instead of defining it.
+- **Diagrams:** usually 2 (architecture + request flow). Use a third only at Lv 3 when a tricky flow really needs it.
+- **Cut pass:** after drafting, re-read and delete every sentence that doesn't help the reader answer this interview question, then check the coverage list above again.
+
 ### Accuracy
 - These are **design opinions, not facts about one company's internals.** Say "a common approach". Never claim how a real company does it unless verified from a primary source.
 - Prefer reputable sources: Hello Interview (problem breakdowns and the delivery framework), Alex Xu's *System Design Interview*, ByteByteGo, *Designing Data-Intensive Applications*, official docs (MDN, Redis, etc.). Verify with web search/fetch when unsure. Say when several answers are valid. Never invent numbers; label assumed traffic numbers as assumptions.
+- **Hello Interview is the methodology, not the script.** Use their breakdown of the problem (if one exists) to check what an interviewer expects you to cover, and cross-check with at least one other source. Then write it your own way: your own explanation, everyday examples, assumed numbers and diagrams, at a junior's level and length. Don't copy their text, their option ratings ("Bad / Good / Great") or their example numbers. Reuse a specific framing only when it is clearly the best way to say it, and cite it.
 - End with a `<p class="sources">` line linking what you relied on.
 
 ## Append rules
@@ -125,7 +136,7 @@ SVG parts (styled by shared CSS; set `style="--i:N"` for the order things appear
 ## Run checklist
 
 1. List existing topics, patterns, dates and levels → choose a new topic, a pattern different from the last two, and the right level.
-2. Research with web search/fetch (Hello Interview breakdown if one exists, plus one more reputable source). Decide what to hedge.
-3. Write the entry (Legend, all required sections in order, 2-3 diagrams) + TOC line, copying the newest entry's markup.
+2. Research with web search/fetch (Hello Interview breakdown if one exists for what to cover, plus at least one more reputable source). Decide what to hedge.
+3. Write the entry (Legend, all required sections in order, usually 2 diagrams) + TOC line, copying the newest entry's markup. Then do the cut pass from "Same coverage, less content".
 4. `python scripts/validate.py` → fix until OK.
 5. Commit with the message format and trailers above, then `git push origin HEAD:main`.
