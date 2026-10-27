@@ -286,6 +286,16 @@ dfn.term{font-style:normal;border-bottom:2px dotted var(--accent);cursor:help}
 .d-packet.alt{fill:#4FD1D9;stroke:#0D4F55}
 .d-packet.red{fill:#FF5A48;stroke:#5A120C}
 :root[data-theme="dark"] .d-edge.accent{filter:drop-shadow(0 0 3px rgba(255,90,72,.55))}
+/* complete diagrams: what each box does (d-item), what each store holds (d-note "signs"), wide layouts */
+.diagram.wide{min-width:760px}
+.d-item{fill:var(--ink-2);font:400 12.5px var(--font-body)}
+.d-note{--f:var(--legend-bg);--s:#9A6B42;--h:transparent;--l:transparent}
+.d-note rect,.d-note .n-body{fill:var(--f);stroke:var(--s);stroke-width:2}
+.d-note-t{fill:var(--legend-ink);font:400 12px var(--font-pixel)}
+.d-mono{fill:var(--legend-ink);font:500 12px var(--font-mono)}
+.js .d-note{opacity:0;transform:scale(.85);transform-box:fill-box;transform-origin:center;transition:opacity .45s steps(4),transform .45s steps(4);transition-delay:calc(var(--i,0)*.18s)}
+.js .diagram.play .d-note{opacity:1;transform:none}
+@media (prefers-reduced-motion:reduce){.js .d-note{opacity:1!important;transform:none!important}}
 
 /* motion (progressive: only when JS is running) */
 .js .d-node{opacity:0;transform:scale(.85);transform-box:fill-box;transform-origin:center;transition:opacity .45s steps(4),transform .45s steps(4);transition-delay:calc(var(--i,0)*.18s)}
@@ -642,6 +652,46 @@ dfn.term{font-style:normal;border-bottom:2px dotted var(--accent);cursor:help}
             <p>Replicas lag a moment behind, so a brand-new link might be missing from one for a fraction of a second. That is the trade we accepted: availability first, perfectly fresh data second.</p>
           </div>
 
+          <div class="reveal">
+            <h4>Final design</h4>
+            <p>Putting the three deep dives together gives the complete picture: a counter for unique codes, a cache for fast redirects, and a replica so one database failure doesn't break every link.</p>
+          </div>
+
+          <figure class="diagram-fig" id="2026-10-27-url-shortener-final">
+            <div class="diagram-scroll" tabindex="0" role="group" aria-label="Diagram: the final URL shortener design. Scrollable on small screens.">
+              <svg class="diagram" viewBox="0 0 760 470" role="img" aria-labelledby="2026-10-27-url-shortener-d3-t 2026-10-27-url-shortener-d3-d">
+                <title id="2026-10-27-url-shortener-d3-t">Final URL shortener design</title>
+                <desc id="2026-10-27-url-shortener-d3-d">A client talks to a load balancer, which passes requests to identical app servers. For a new link, an app server gets the next number from a Redis counter, encodes it in base62 and saves the row in the primary database. For a click, it checks a Redis cache first, falls back to the database, and replies with a 302 redirect. The cache holds short code to long URL entries; the database holds the links table and copies every write to a replica that can take over.</desc>
+                <g class="d-node grass" style="--i:0"><rect x="10" y="200" width="104" height="64"/><text class="d-text" x="62" y="234" text-anchor="middle">Client</text><text class="d-sub" x="62" y="252" text-anchor="middle">browser / app</text></g>
+                <g class="d-node" style="--i:0"><rect x="140" y="192" width="120" height="80"/><text class="d-text" x="200" y="222" text-anchor="middle">Load</text><text class="d-text" x="200" y="240" text-anchor="middle">balancer</text><text class="d-sub" x="200" y="260" text-anchor="middle">spreads requests</text></g>
+                <path class="d-edge" style="--i:1" d="M114 232H140"/><path class="d-arrow" style="--i:1" d="M134 226L142 232L134 238Z"/><path class="d-arrow" style="--i:1" d="M120 226L112 232L120 238Z"/>
+                <g class="d-node cmd" style="--i:2"><rect x="290" y="166" width="200" height="132"/><text class="d-text" x="390" y="196" text-anchor="middle">App servers</text><text class="d-item" x="306" y="222">- new link: get a number,</text><text class="d-item" x="316" y="240">base62 it, save the row</text><text class="d-item" x="306" y="264">- click: check the cache,</text><text class="d-item" x="316" y="282">else the DB; reply 302</text></g>
+                <path class="d-edge" style="--i:3" d="M260 232H290"/><path class="d-arrow" style="--i:3" d="M284 226L292 232L284 238Z"/><path class="d-arrow" style="--i:3" d="M266 226L258 232L266 238Z"/>
+                <g class="d-node furnace" style="--i:4"><rect x="315" y="24" width="150" height="72"/><text class="d-text" x="390" y="56" text-anchor="middle">Counter</text><text class="d-sub" x="390" y="78" text-anchor="middle">Redis INCR, +1 each</text></g>
+                <path class="d-edge" style="--i:4" d="M390 96V166"/><path class="d-arrow" style="--i:4" d="M384 102L390 94L396 102Z"/><path class="d-arrow" style="--i:4" d="M384 160L390 168L396 160Z"/>
+                <text class="d-label" style="--i:4" x="400" y="136">next number</text>
+                <g class="d-node gem" style="--i:5"><rect x="315" y="372" width="150" height="72"/><text class="d-text" x="390" y="404" text-anchor="middle">Cache</text><text class="d-sub" x="390" y="426" text-anchor="middle">Redis, in memory</text></g>
+                <path class="d-edge accent" style="--i:5" d="M390 298V372"/><path class="d-arrow accent" style="--i:5" d="M384 304L390 296L396 304Z"/><path class="d-arrow accent" style="--i:5" d="M384 366L390 374L396 366Z"/>
+                <text class="d-label" style="--i:5" x="400" y="340">check first</text>
+                <path class="d-line" style="--i:5" d="M465 408H485"/>
+                <g class="d-note" style="--i:5"><rect x="485" y="380" width="190" height="86"/><text class="d-note-t" x="497" y="400">cache entry</text><text class="d-mono" x="497" y="420">key   short_code</text><text class="d-mono" x="497" y="438">value long_url</text><text class="d-mono" x="497" y="456">TTL   &lt;= link expiry</text></g>
+                <g class="d-node chest" style="--i:6"><rect x="580" y="196" width="170" height="72"/><text class="d-text" x="665" y="234" text-anchor="middle">Database</text><text class="d-sub" x="665" y="254" text-anchor="middle">primary: every write</text></g>
+                <path class="d-edge" style="--i:6" d="M490 232H580"/><path class="d-arrow" style="--i:6" d="M574 226L582 232L574 238Z"/><path class="d-arrow" style="--i:6" d="M496 226L488 232L496 238Z"/>
+                <text class="d-label" style="--i:6" x="535" y="222" text-anchor="middle">read/write</text>
+                <path class="d-line" style="--i:6" d="M665 154V196"/>
+                <g class="d-note" style="--i:6"><rect x="560" y="22" width="190" height="132"/><text class="d-note-t" x="574" y="44">links table</text><text class="d-mono" x="574" y="66">short_code  PK</text><text class="d-mono" x="574" y="86">long_url</text><text class="d-mono" x="574" y="106">created_at</text><text class="d-mono" x="574" y="126">expires_at  optional</text></g>
+                <g class="d-node chest" style="--i:7"><rect x="580" y="304" width="170" height="68"/><text class="d-text" x="665" y="340" text-anchor="middle">Replica</text><text class="d-sub" x="665" y="358" text-anchor="middle">standby, serves reads</text></g>
+                <path class="d-edge" style="--i:7" d="M665 268V304"/><path class="d-arrow" style="--i:7" d="M659 298L665 306L671 298Z"/>
+                <text class="d-label" style="--i:7" x="655" y="291" text-anchor="end">copies writes</text>
+                <rect class="d-packet" x="-6" y="-6" width="12" height="12" opacity="0"><animateMotion dur="8s" begin="1.4s" repeatCount="indefinite" keyPoints="0;1;1" keyTimes="0;.3;1" calcMode="linear" path="M114 232H390V96"/><animate attributeName="opacity" dur="8s" begin="1.4s" repeatCount="indefinite" values="0;1;1;0;0" keyTimes="0;.02;.28;.3;1"/></rect>
+                <rect class="d-packet" x="-6" y="-6" width="12" height="12" opacity="0"><animateMotion dur="8s" begin="1.4s" repeatCount="indefinite" keyPoints="0;0;1;1" keyTimes="0;.32;.45;1" calcMode="linear" path="M390 232H580"/><animate attributeName="opacity" dur="8s" begin="1.4s" repeatCount="indefinite" values="0;0;1;1;0;0" keyTimes="0;.32;.33;.44;.45;1"/></rect>
+                <rect class="d-packet alt" x="-6" y="-6" width="12" height="12" opacity="0"><animateMotion dur="8s" begin="1.4s" repeatCount="indefinite" keyPoints="0;0;1;1" keyTimes="0;.55;.85;1" calcMode="linear" path="M114 232H390V372"/><animate attributeName="opacity" dur="8s" begin="1.4s" repeatCount="indefinite" values="0;0;1;1;0;0" keyTimes="0;.55;.56;.84;.85;1"/></rect>
+              </svg>
+            </div>
+            <figcaption>The complete system. Each block says what it does, and the signs show what each store holds. Gold = creating a link, cyan = following one.</figcaption>
+            <button class="replay" type="button" aria-label="Replay diagram animation">Replay</button>
+          </figure>
+
           <div class="next reveal">
             <h4>What you could add next</h4>
             <ul class="next-list">
@@ -744,8 +794,8 @@ dfn.term{font-style:normal;border-bottom:2px dotted var(--accent);cursor:help}
     rev.forEach(function(e){ro.observe(e);});
   }
 
-  /* diagram nodes: blocky pixel corners, bevels and block-style details */
-  $('svg.diagram .d-node').forEach(function(g){
+  /* diagram nodes and notes: blocky pixel corners, bevels and block-style details */
+  $('svg.diagram .d-node, svg.diagram .d-note').forEach(function(g){
     var r=g.querySelector('rect');if(!r)return;
     var x=+r.getAttribute('x'),y=+r.getAttribute('y'),w=+r.getAttribute('width'),h=+r.getAttribute('height'),p=5;
     if(!(w>0&&h>0))return;

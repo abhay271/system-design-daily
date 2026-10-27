@@ -85,7 +85,7 @@ for i in p.ids:
     seen.add(i)
 
 # svgs
-svgs = [s for s in re.findall(r"<svg\b.*?</svg>", html, flags=re.S) if 'class="diagram"' in s[:200]]
+svgs = [s for s in re.findall(r"<svg\b.*?</svg>", html, flags=re.S) if re.search(r'class="diagram[ "]', s[:200])]
 if not svgs:
     err("no diagram SVG found")
 for n, s in enumerate(svgs, 1):
@@ -105,8 +105,8 @@ for n, s in enumerate(svgs, 1):
         cls = el.get("class") or ""
         if el.tag.endswith("path") and "d-edge" in cls and not el.get("d"):
             err(f"svg #{n} edge without d")
-        if "d-node" in cls.split() and el.find(f"{ns}rect") is None:
-            err(f"svg #{n} has a .d-node without a <rect> (nodes are drawn from their rect)")
+        if ("d-node" in cls.split() or "d-note" in cls.split()) and el.find(f"{ns}rect") is None:
+            err(f"svg #{n} has a .d-node/.d-note without a <rect> (they are drawn from their rect)")
 
 # articles
 arts = re.findall(r"<article class=\"entry\"([^>]*)>", html)
@@ -150,9 +150,12 @@ for m in re.finditer(r'<article class="entry" id="([^"]+)".*?</article>', html, 
             err(f"entry {aid}: Legend has {n_terms} terms (need 4-10)")
         if len(re.findall(r'<dfn class="term" title="[^"]+">', body)) < min(n_terms, 4):
             err(f"entry {aid}: wrap each legend term's first use in <dfn class=\"term\" title=\"...\">")
-    n_svg = len(re.findall(r'<svg class="diagram"', body))
-    if not 1 <= n_svg <= 3:
-        err(f"entry {aid}: has {n_svg} diagrams (need 1-3)")
+    n_svg = len(re.findall(r'<svg class="diagram[ "]', body))
+    if not 2 <= n_svg <= 3:
+        err(f"entry {aid}: has {n_svg} diagrams (need 2-3, including the final design)")
+    final = body.find(f'<figure class="diagram-fig" id="{aid}-final">')
+    if not body.find(f'id="{aid}-sec-deepdives"') < final < body.find(f'id="{aid}-sec-tips"'):
+        err(f"entry {aid}: needs the Final design diagram <figure class=\"diagram-fig\" id=\"{aid}-final\"> after the deep dives (inside sec-deepdives)")
     if aid[:10] >= BUDGET_FROM:
         # same count as the page's read time: lede + prose, minus diagrams, code, tables and Legend
         text = re.sub(r"<(svg|pre|table|details)\b.*?</\1>", " ", body, flags=re.S)
