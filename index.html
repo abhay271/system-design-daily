@@ -410,7 +410,7 @@ dfn.term{font-style:normal;border-bottom:2px dotted var(--accent);cursor:help}
       <h2><svg viewBox="0 0 12 12" aria-hidden="true"><path fill="#7A4A2A" d="M0 2h12v9H0z"/><path fill="#A86A3C" d="M1 3h10v3H1zM1 7h10v3H1z"/><path fill="#E9B526" d="M5 5h2v3H5z"/><path fill="#4A2C18" d="M0 6h5v1H0zM7 6h5v1H7z"/></svg>Archive</h2>
       <ol class="toc">
         <!-- TOC -->
-        <li><a href="#2026-10-28-url-shortener"><time datetime="2026-10-28">2026-10-28</time><span>URL shortener: one lookup, billions of clicks</span></a></li>
+        <li><a href="#2026-10-27-url-shortener"><time datetime="2026-10-27">2026-10-27</time><span>URL shortener: one lookup, billions of clicks</span></a></li>
       </ol>
     </nav>
     <p class="sidebar-note">One design a day, newest first. Each follows the same seven steps, so you can compare them side by side.</p>
@@ -418,24 +418,24 @@ dfn.term{font-style:normal;border-bottom:2px dotted var(--accent);cursor:help}
 
   <main id="entries" tabindex="-1">
     <!-- ENTRIES -->
-    <article class="entry" id="2026-10-28-url-shortener" data-topic="URL shortener" data-domain="Read-heavy lookup" data-date="2026-10-28" data-level="1">
+    <article class="entry" id="2026-10-27-url-shortener" data-topic="URL shortener" data-domain="Read-heavy lookup" data-date="2026-10-27" data-level="1">
       <header class="entry-head">
         <div class="entry-meta">
           <span class="chip">Read-heavy lookup</span>
           <span class="level" title="Difficulty: level 1 of 3">Lv 1</span>
-          <time datetime="2026-10-28">28 Oct 2026</time>
+          <time datetime="2026-10-27">27 Oct 2026</time>
           <span class="read"><span class="read-time">6</span> min read</span>
         </div>
         <h2 class="entry-title">Design a URL shortener</h2>
         <p class="lede">You paste a long link and get back something tiny like <code>sho.rt/x7Kp2Q</code>. Anyone who opens the tiny link lands on the original page. It is the classic first system design question: small enough for one interview, yet it still covers unique IDs, caching and staying online.</p>
         <nav class="steps" aria-label="Sections of this design">
-          <a href="#2026-10-28-url-shortener-sec-functional">Features</a>
-          <a href="#2026-10-28-url-shortener-sec-nonfunctional">Qualities</a>
-          <a href="#2026-10-28-url-shortener-sec-entities">Entities</a>
-          <a href="#2026-10-28-url-shortener-sec-api">API</a>
-          <a href="#2026-10-28-url-shortener-sec-hld">Design</a>
-          <a href="#2026-10-28-url-shortener-sec-deepdives">Deep dives</a>
-          <a href="#2026-10-28-url-shortener-sec-tips">Tips</a>
+          <a href="#2026-10-27-url-shortener-sec-functional">Features</a>
+          <a href="#2026-10-27-url-shortener-sec-nonfunctional">Qualities</a>
+          <a href="#2026-10-27-url-shortener-sec-entities">Entities</a>
+          <a href="#2026-10-27-url-shortener-sec-api">API</a>
+          <a href="#2026-10-27-url-shortener-sec-hld">Design</a>
+          <a href="#2026-10-27-url-shortener-sec-deepdives">Deep dives</a>
+          <a href="#2026-10-27-url-shortener-sec-tips">Tips</a>
         </nav>
       </header>
 
@@ -456,7 +456,7 @@ dfn.term{font-style:normal;border-bottom:2px dotted var(--accent);cursor:help}
           </dl>
         </details>
 
-        <section class="sec reveal" id="2026-10-28-url-shortener-sec-functional">
+        <section class="sec reveal" id="2026-10-27-url-shortener-sec-functional">
           <h3>Functional requirements</h3>
           <ul class="reqs">
             <li>Submit a long URL and get a short one back.</li>
@@ -466,7 +466,7 @@ dfn.term{font-style:normal;border-bottom:2px dotted var(--accent);cursor:help}
           <p class="out">Out of scope: user accounts, click analytics, spam and malware filtering.</p>
         </section>
 
-        <section class="sec reveal" id="2026-10-28-url-shortener-sec-nonfunctional">
+        <section class="sec reveal" id="2026-10-27-url-shortener-sec-nonfunctional">
           <h3>Non-functional requirements</h3>
           <ul class="reqs nfr">
             <li><strong>Unique <dfn class="term" title="The characters at the end of a short link that identify it, like x7Kp2Q.">short codes</dfn>.</strong> One code must point to exactly one long URL, or people land on the wrong site.</li>
@@ -476,7 +476,7 @@ dfn.term{font-style:normal;border-bottom:2px dotted var(--accent);cursor:help}
           </ul>
         </section>
 
-        <section class="sec reveal" id="2026-10-28-url-shortener-sec-entities">
+        <section class="sec reveal" id="2026-10-27-url-shortener-sec-entities">
           <h3>Core entities</h3>
           <ul class="entities">
             <li><strong>Link:</strong> the short code, the original long URL, when it was made and (optionally) when it expires.</li>
@@ -484,7 +484,7 @@ dfn.term{font-style:normal;border-bottom:2px dotted var(--accent);cursor:help}
           </ul>
         </section>
 
-        <section class="sec reveal" id="2026-10-28-url-shortener-sec-api">
+        <section class="sec reveal" id="2026-10-27-url-shortener-sec-api">
           <h3>API design</h3>
           <p>One <dfn class="term" title="One address plus HTTP method that the server answers.">endpoint</dfn> per functional requirement is enough.</p>
           <div class="api-list">
@@ -516,7 +516,7 @@ dfn.term{font-style:normal;border-bottom:2px dotted var(--accent);cursor:help}
           </div>
         </section>
 
-        <section class="sec" id="2026-10-28-url-shortener-sec-hld">
+        <section class="sec" id="2026-10-27-url-shortener-sec-hld">
           <h3>High-level design</h3>
           <div class="reveal">
             <p>We build it one requirement at a time, simplest version first. I'll assume the usual setup: a few identical app servers that keep no data of their own, behind a <dfn class="term" title="Spreads incoming requests across several app servers.">load balancer</dfn>.</p>
@@ -540,9 +540,9 @@ dfn.term{font-style:normal;border-bottom:2px dotted var(--accent);cursor:help}
 
           <figure class="diagram-fig">
             <div class="diagram-scroll" tabindex="0" role="group" aria-label="Diagram: URL shortener architecture. Scrollable on small screens.">
-              <svg class="diagram" viewBox="0 0 760 300" role="img" aria-labelledby="2026-10-28-url-shortener-d1-t 2026-10-28-url-shortener-d1-d">
-                <title id="2026-10-28-url-shortener-d1-t">URL shortener architecture</title>
-                <desc id="2026-10-28-url-shortener-d1-d">A client sends requests to a load balancer, which passes them to identical app servers. The app servers ask a counter for new numbers when creating links, check a cache first when following links, and read and write a database that has a replica.</desc>
+              <svg class="diagram" viewBox="0 0 760 300" role="img" aria-labelledby="2026-10-27-url-shortener-d1-t 2026-10-27-url-shortener-d1-d">
+                <title id="2026-10-27-url-shortener-d1-t">URL shortener architecture</title>
+                <desc id="2026-10-27-url-shortener-d1-d">A client sends requests to a load balancer, which passes them to identical app servers. The app servers ask a counter for new numbers when creating links, check a cache first when following links, and read and write a database that has a replica.</desc>
                 <g class="d-node grass" style="--i:0"><rect x="20" y="118" width="120" height="60"/><text class="d-text" x="80" y="152" text-anchor="middle">Client</text><text class="d-sub" x="80" y="168" text-anchor="middle">browser / app</text></g>
                 <path class="d-edge" style="--i:1" d="M140 148H176"/><path class="d-arrow" style="--i:1" d="M170 142L178 148L170 154Z"/>
                 <g class="d-node" style="--i:2"><rect x="180" y="118" width="140" height="60"/><text class="d-text" x="250" y="146" text-anchor="middle">Load</text><text class="d-text" x="250" y="164" text-anchor="middle">balancer</text></g>
@@ -574,9 +574,9 @@ dfn.term{font-style:normal;border-bottom:2px dotted var(--accent);cursor:help}
 
           <figure class="diagram-fig">
             <div class="diagram-scroll" tabindex="0" role="group" aria-label="Diagram: what happens when someone opens a short link. Scrollable on small screens.">
-              <svg class="diagram" viewBox="0 0 760 330" role="img" aria-labelledby="2026-10-28-url-shortener-d2-t 2026-10-28-url-shortener-d2-d">
-                <title id="2026-10-28-url-shortener-d2-t">Following a short link, step by step</title>
-                <desc id="2026-10-28-url-shortener-d2-d">The browser asks the app server for the short code. The app server asks the cache, which returns the long URL; on a miss the server reads the database and fills the cache. The app server answers with a 302 redirect, and the browser then loads the original site.</desc>
+              <svg class="diagram" viewBox="0 0 760 330" role="img" aria-labelledby="2026-10-27-url-shortener-d2-t 2026-10-27-url-shortener-d2-d">
+                <title id="2026-10-27-url-shortener-d2-t">Following a short link, step by step</title>
+                <desc id="2026-10-27-url-shortener-d2-d">The browser asks the app server for the short code. The app server asks the cache, which returns the long URL; on a miss the server reads the database and fills the cache. The app server answers with a 302 redirect, and the browser then loads the original site.</desc>
                 <g class="d-node grass" style="--i:0"><rect x="20" y="14" width="140" height="50"/><text class="d-text" x="90" y="45" text-anchor="middle">Browser</text></g>
                 <g class="d-node cmd" style="--i:0"><rect x="220" y="14" width="140" height="50"/><text class="d-text" x="290" y="45" text-anchor="middle">App server</text></g>
                 <g class="d-node gem" style="--i:0"><rect x="420" y="14" width="140" height="50"/><text class="d-text" x="490" y="45" text-anchor="middle">Cache</text></g>
@@ -606,7 +606,7 @@ dfn.term{font-style:normal;border-bottom:2px dotted var(--accent);cursor:help}
           </aside>
         </section>
 
-        <section class="sec" id="2026-10-28-url-shortener-sec-deepdives">
+        <section class="sec" id="2026-10-27-url-shortener-sec-deepdives">
           <h3>Deep dives</h3>
           <div class="dive reveal">
             <h4>How do we keep short codes unique?</h4>
@@ -653,7 +653,7 @@ dfn.term{font-style:normal;border-bottom:2px dotted var(--accent);cursor:help}
           </div>
         </section>
 
-        <section class="sec reveal" id="2026-10-28-url-shortener-sec-tips">
+        <section class="sec reveal" id="2026-10-27-url-shortener-sec-tips">
           <h3>Interview tips</h3>
           <dl class="qa">
             <div><dt>Why 302 instead of 301?</dt><dd>A 302 keeps every click coming through us, so we can expire, change or count links. Browsers cache a 301 and stop asking.</dd></div>

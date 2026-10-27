@@ -41,6 +41,7 @@ Modelled on Hello Interview's delivery framework ("System Design in a Hurry"), s
 
 ## Append rules
 
+- **Date:** use today's date in India time: `TZ=Asia/Kolkata date +%F` (the routine runs at 06:37 IST). If an entry with that date already exists, stop without changes.
 - Insert the new entry as one self-contained
   `<article class="entry" id="YYYY-MM-DD-slug" data-topic="..." data-domain="<pattern>" data-date="YYYY-MM-DD" data-level="1|2|3">`
   directly below the `<!-- ENTRIES -->` marker (newest first). **Never modify or reorder older entries.**
@@ -59,12 +60,12 @@ Modelled on Hello Interview's delivery framework ("System Design in a Hurry"), s
 ## Component reference (entry markup)
 
 ```html
-<article class="entry" id="2026-10-28-url-shortener" data-topic="URL shortener" data-domain="Read-heavy lookup" data-date="2026-10-28" data-level="1">
+<article class="entry" id="2026-10-27-url-shortener" data-topic="URL shortener" data-domain="Read-heavy lookup" data-date="2026-10-27" data-level="1">
   <header class="entry-head">
     <div class="entry-meta">
       <span class="chip">Read-heavy lookup</span>
       <span class="level" title="Difficulty: level 1 of 3">Lv 1</span>
-      <time datetime="2026-10-28">28 Oct 2026</time>
+      <time datetime="2026-10-27">27 Oct 2026</time>
       <span class="read"><span class="read-time">5</span> min read</span>
     </div>
     <h2 class="entry-title">Design a URL shortener</h2>
