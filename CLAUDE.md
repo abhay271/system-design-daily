@@ -7,9 +7,17 @@ This repo is one self-contained `index.html`, served by GitHub Pages from `main`
 1. **Date:** `TZ=Asia/Kolkata date +%F`. If an entry with that date already exists, stop without changes.
 2. **Pick the topic** (section 2): list existing entries with `grep -o 'data-topic="[^"]*" data-domain="[^"]*" data-date="[^"]*" data-level="[^"]*"' index.html`.
 3. **Research** (section 7): Hello Interview's breakdown for what to cover (if one exists) plus at least one other reputable source. Decide what to hedge.
-4. **Write** the entry and its archive line, copying the newest entry's markup (sections 3-6 and 9). Then do the cut pass (section 3) and the completeness check (section 5).
-5. **Validate:** `python scripts/validate.py`, and fix until it prints OK.
-6. **Commit and push** (section 8).
+4. **Write** the entry and its archive line, copying the newest entry's markup (sections 3-6 and 9).
+5. **Self-review before validating.** Re-read the whole entry as the reader would, and fix anything that falls short:
+   - **Cut pass:** do the cut pass (section 3).
+   - **Details:** tick every applicable item in section 5.
+   - **Diagrams:** check each one against every rule in section 6.
+   - **Quality bar:** put your Final design side by side with the URL shortener's (`2026-10-27-url-shortener-final`). It must be at least as complete: every service says what it does, every store has a sign, every arrow is labelled.
+   - **Accuracy:** check every number and status code once more.
+6. **Validate:** `python scripts/validate.py`, and fix until it prints OK.
+7. **Commit and push** (section 8).
+
+**The quality bar is fixed.** The URL shortener (2026-10-27) is the reference for completeness and diagram quality. Never let an entry be weaker than it in these respects, even if a more recent entry is. Take markup from the newest entry and standards from this file.
 
 ## 2. Topic
 
@@ -122,6 +130,7 @@ Small details are what separate a vague answer from an interview-ready one. Befo
   - the seven sections, in order;
   - Legend size;
   - 2-3 diagrams, including the Final design inside the deep dives;
+  - the Final design is complete: every service has `d-item` lines, there is no generic "App servers" box, two or more services sit behind a gateway, there is at least one sign, and there are at least 3 arrow labels;
   - the 1,000-word cap and at most 3 deep dives;
   - the archive list matches the entries, in the same order;
   - no external resources;

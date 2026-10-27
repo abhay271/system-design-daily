@@ -156,6 +156,36 @@ for m in re.finditer(r'<article class="entry" id="([^"]+)".*?</article>', html, 
     final = body.find(f'<figure class="diagram-fig" id="{aid}-final">')
     if not body.find(f'id="{aid}-sec-deepdives"') < final < body.find(f'id="{aid}-sec-tips"'):
         err(f"entry {aid}: needs the Final design diagram <figure class=\"diagram-fig\" id=\"{aid}-final\"> after the deep dives (inside sec-deepdives)")
+    else:
+        # the Final design must be complete (CLAUDE.md sections 5 and 6)
+        fsvg = re.search(r"<svg\b.*?</svg>", body[final:], flags=re.S)
+        try:
+            froot = ET.fromstring(fsvg.group(0).replace("<svg", '<svg xmlns="http://www.w3.org/2000/svg"', 1))
+        except (AttributeError, ET.ParseError):
+            froot = None
+        if froot is not None:
+            ns = "{http://www.w3.org/2000/svg}"
+            groups = list(froot.iter(f"{ns}g"))
+            cls = lambda el: (el.get("class") or "").split()
+            texts = lambda el, c: [t for t in el.iter(f"{ns}text") if c in cls(t)]
+            services = [g for g in groups if "d-node" in cls(g) and "cmd" in cls(g)]
+            titles = " ".join(" ".join((t.text or "") for t in texts(g, "d-text")) for g in groups if "d-node" in cls(g)).lower()
+            pre = f"entry {aid}: Final design"
+            if not services:
+                err(f"{pre} has no service node (class \"d-node cmd\")")
+            for g in services:
+                if not texts(g, "d-item"):
+                    name = " ".join(t.text or "" for t in texts(g, "d-text"))
+                    err(f"{pre}: service '{name}' needs d-item lines saying what it does")
+            if re.search(r"\bapp servers?\b", titles):
+                err(f"{pre} still has a generic 'App servers' box; split the logic into services by job/load")
+            if len(services) >= 2 and "gateway" not in titles:
+                err(f"{pre} has {len(services)} services but no API gateway node routing to them")
+            if not [g for g in groups if "d-note" in cls(g)]:
+                err(f"{pre} needs at least one d-note sign showing what a store holds")
+            n_labels = len(texts(froot, "d-label"))
+            if n_labels < 3:
+                err(f"{pre} has only {n_labels} arrow labels; label what flows on each arrow")
     if aid[:10] >= BUDGET_FROM:
         # same count as the page's read time: lede + prose, minus diagrams, code, tables and Legend
         text = re.sub(r"<(svg|pre|table|details)\b.*?</\1>", " ", body, flags=re.S)
