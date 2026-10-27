@@ -1,0 +1,130 @@
+# System Design Daily: standing instructions
+
+This repo is one self-contained `index.html` (served by GitHub Pages from `main`). Each scheduled run adds ONE new system design walkthrough at the top. Everything you need is in this file.
+
+## Content spec
+
+### Topic
+- Each run, pick ONE frequently asked, **junior-level** system design interview question. Examples: URL shortener, pastebin, rate limiter, unique ID generator, key-value store, notification system, chat app, news feed, leaderboard, search autocomplete, web crawler, nearby places (Yelp-style), photo sharing (Instagram-style), Dropbox-style file sync, YouTube/Spotify-style streaming, Uber-style ride hailing, ticket booking, ad click counter, job scheduler.
+- `data-domain` is the design **pattern**. Use exactly one of these names: `Read-heavy lookup`, `Write-heavy logging`, `Real-time messaging`, `Feeds`, `Media & files`, `Geo & location`, `Search`, `Queues & async jobs`, `Counters & limits`.
+- Before choosing, read every existing entry's topic and pattern: `grep -o 'data-topic="[^"]*" data-domain="[^"]*" data-date="[^"]*" data-level="[^"]*"' index.html`. **Never repeat a topic.** Pick a pattern different from the **last two** entries.
+- **Ramp up slowly** with `data-level` (shown as "Lv 1-3"): roughly the first 6 entries are Lv 1 (one or two moving parts: URL shortener, pastebin, rate limiter, unique ID generator, leaderboard); then mix Lv 1-2 (notification system, chat app, news feed, autocomplete, web crawler, nearby places, photo sharing); Lv 3 only after about 12 entries (file sync, video streaming, ride hailing, ticket booking). Even Lv 3 must stay at new-grad interview level: never staff-level depth.
+
+### Audience and tone
+- Reader: an undergrad who hasn't graduated, wants the **basics and breadth**, and rarely gets deep system design rounds. Assume they have NOT heard of load balancers, caches, sharding, queues, CDNs, replicas or consistent hashing.
+- Simple but not shallow; technical but not overwhelming. Short sentences, everyday words, one idea per paragraph. Concrete example first, then the real term. If a plain word works, use it.
+- The design must be correct and defensible in an interview, but it is the **simple version a junior is expected to give**: a few components, each with a clear reason. Scaling ideas go in the "What you could add next" box, not in the main design.
+- Assume the generic scaling answer (identical app servers that keep no data, behind a load balancer, e.g. on EC2). Mention it in one sentence in the high-level design and don't re-argue it.
+- **Legend:** every entry has a collapsible Legend at the top explaining each new or non-obvious term in 1-2 plain sentences, 4-10 terms, ordered by first use. Wrap each term's **first use** in the text with `<dfn class="term" title="short definition">`.
+- **Analogies must earn their place:** use one only if it maps closely to how the system really works. If it half-fits or needs "but unlike..." caveats, drop it. Zero is fine; at most one or two per entry; never one per section.
+- **Length:** roughly 900-1300 words of prose (not counting Legend, code, tables, diagrams), 4-6 minutes. Each deep dive is 2-3 short paragraphs at most.
+
+### Required structure (same order, same headings, every entry)
+Modelled on Hello Interview's delivery framework ("System Design in a Hurry"), simplified for juniors.
+
+1. **Functional requirements** (`sec-functional`): only the 2-4 core features that make this product what it is, one line each (e.g. "Submit a long URL and get a short one"). Optionally one line "Out of scope: ...".
+2. **Non-functional requirements** (`sec-nonfunctional`): 2-4 qualities that matter for THIS problem, each with one sentence on why it matters here.
+3. **Core entities** (`sec-entities`, optional, only if helpful): 2-4 main things stored, one line each.
+4. **API design** (`sec-api`): 2-4 endpoints (method, path, request, response), one per functional requirement.
+5. **High-level design** (`sec-hld`): built up step by step, one functional requirement at a time, simplest version first. Include the simple data model (a `.schema` table), the architecture diagram and a request-flow diagram.
+6. **Deep dives** (`sec-deepdives`): very basic, one per non-functional requirement (or genuinely tricky part), each titled as a question ("How do we keep redirects fast?"). Show 2-3 realistic options as `.options`, mark the chosen one `.pick`, and say why. End the section with the "What you could add next" box (2-4 scaling ideas).
+7. **Interview tips** (`sec-tips`): 3-4 likely follow-ups with one-line answers (`.qa`), 1-2 common junior mistakes (`.mistakes`), and one short `callout tip`.
+
+- **No upfront back-of-the-envelope section.** Do math only INLINE where it changes a design decision ("100M new URLs a month is about 40 writes a second, which one database handles easily, so no sharding yet"). Round numbers, explain each, double-check the arithmetic, and skip math that doesn't affect a decision.
+- **Diagrams:** 2-3 simple, clearly labelled, animated diagrams per entry (minimum 1, normally an architecture diagram plus a request-flow diagram). Few boxes, plain labels.
+- Use the `callout why` for the key trade-off, and a `callout confidence` where a detail depends on assumptions or where several answers are valid.
+
+### Accuracy
+- These are **design opinions, not facts about one company's internals.** Say "a common approach". Never claim how a real company does it unless verified from a primary source.
+- Prefer reputable sources: Hello Interview (problem breakdowns and the delivery framework), Alex Xu's *System Design Interview*, ByteByteGo, *Designing Data-Intensive Applications*, official docs (MDN, Redis, etc.). Verify with web search/fetch when unsure. Say when several answers are valid. Never invent numbers; label assumed traffic numbers as assumptions.
+- End with a `<p class="sources">` line linking what you relied on.
+
+## Append rules
+
+- Insert the new entry as one self-contained
+  `<article class="entry" id="YYYY-MM-DD-slug" data-topic="..." data-domain="<pattern>" data-date="YYYY-MM-DD" data-level="1|2|3">`
+  directly below the `<!-- ENTRIES -->` marker (newest first). **Never modify or reorder older entries.**
+- Add it to the archive directly below the `<!-- TOC -->` marker:
+  `<li><a href="#ID"><time datetime="YYYY-MM-DD">YYYY-MM-DD</time><span>Short title</span></a></li>`
+- All CSS and JS live once in `index.html`; entries add **markup only**, reusing existing classes. If a needed component truly doesn't exist, ADD new CSS lines without changing any existing line (the validator rejects changed lines).
+- Diagrams are hand-written inline SVG using the shared classes. No Mermaid, no images, no iframes, no external JS or CDN. Google Fonts are already set up.
+- **Use the newest entry as your template**: copy its markup structure exactly and change the content.
+- Every `id` inside an entry starts with the entry id: sections are `ID-sec-functional`, `ID-sec-nonfunctional`, `ID-sec-entities`, `ID-sec-api`, `ID-sec-hld`, `ID-sec-deepdives`, `ID-sec-tips`; SVG titles are `ID-d1-t` / `ID-d1-d`, etc. The `.steps` nav at the top links to those section ids (drop the Entities link if you skip that section).
+- **Validate before committing:** `python scripts/validate.py`. It checks well-formed HTML, SVGs (parse, title/desc, viewBox), unique and prefixed ids, the required sections in order, Legend term count, 1-3 diagrams, TOC/article order, no external resources, and (via `git diff`) that no existing line changed. Fix everything it reports. Never use `--allow-edits` in a scheduled run.
+- **Commit message:** `Add design: <topic> (<pattern>)`, then a blank line, then these two trailer lines at the very end, exactly (keep any other trailers your environment adds):
+  `Co-Authored-By: abhay271 <153154236+abhay271@users.noreply.github.com>`
+  `Co-Authored-By: Claude <noreply@anthropic.com>`
+- Push directly to `main`: `git push origin HEAD:main`. Do not open a PR. The trailers are only metadata; never let them block or delay the commit and push.
+
+## Component reference (entry markup)
+
+```html
+<article class="entry" id="2026-10-28-url-shortener" data-topic="URL shortener" data-domain="Read-heavy lookup" data-date="2026-10-28" data-level="1">
+  <header class="entry-head">
+    <div class="entry-meta">
+      <span class="chip">Read-heavy lookup</span>
+      <span class="level" title="Difficulty: level 1 of 3">Lv 1</span>
+      <time datetime="2026-10-28">28 Oct 2026</time>
+      <span class="read"><span class="read-time">5</span> min read</span>
+    </div>
+    <h2 class="entry-title">Design a URL shortener</h2>
+    <p class="lede">What the product does, in one everyday example, and why it is a good interview question.</p>
+    <nav class="steps" aria-label="Sections of this design"><a href="#ID-sec-functional">Features</a> … <a href="#ID-sec-tips">Tips</a></nav>
+  </header>
+  <div class="prose">
+    <details class="legend"><summary>Legend <span class="hint">N terms used below</span></summary>
+      <dl><div><dt>Term</dt><dd>One or two plain sentences.</dd></div> …</dl></details>
+    <section class="sec reveal" id="ID-sec-functional"><h3>Functional requirements</h3>
+      <ul class="reqs"><li>One line.</li></ul><p class="out">Out of scope: …</p></section>
+    <section class="sec reveal" id="ID-sec-nonfunctional"><h3>Non-functional requirements</h3>
+      <ul class="reqs nfr"><li><strong>Quality.</strong> Why it matters here.</li></ul></section>
+    <section class="sec reveal" id="ID-sec-entities"><h3>Core entities</h3>
+      <ul class="entities"><li><strong>Thing:</strong> what it holds.</li></ul></section>
+    <section class="sec reveal" id="ID-sec-api"><h3>API design</h3>
+      <div class="api-list"><div class="api">
+        <div class="api-sig"><span class="method">POST</span><code>/things</code></div>   <!-- method classes: (none)=POST, get, put, patch, delete -->
+        <p>What it does.</p>
+        <div class="io"><div><span class="io-l">Request body</span><pre>{ … }</pre></div><div><span class="io-l">Response 201 Created</span><pre>{ … }</pre></div></div>
+      </div></div></section>
+    <section class="sec" id="ID-sec-hld"><h3>High-level design</h3>
+      <div class="reveal"><p>…</p><h4>1. First requirement</h4><p>…</p>
+        <div class="table-scroll"><table class="schema"><caption>Table: name</caption><thead><tr><th>Column</th><th>Type</th><th>Note</th></tr></thead><tbody><tr><td>col</td><td>text</td><td>…</td></tr></tbody></table></div></div>
+      <figure class="diagram-fig"> … see below … </figure>
+      <aside class="callout why reveal"><span class="callout-label">Why</span><p><strong>Key trade-off?</strong> …</p></aside>
+    </section>
+    <section class="sec" id="ID-sec-deepdives"><h3>Deep dives</h3>
+      <div class="dive reveal"><h4>How do we …?</h4><p>…</p>
+        <ol class="options"><li><strong>Option.</strong> Pros and cons.</li><li class="pick"><strong>Option.</strong><span class="pick-tag">Pick</span> …</li></ol>
+        <p>Why this pick.</p></div>
+      <div class="next reveal"><h4>What you could add next</h4><ul class="next-list"><li>…</li></ul></div>
+    </section>
+    <section class="sec reveal" id="ID-sec-tips"><h3>Interview tips</h3>
+      <dl class="qa"><div><dt>Follow-up question?</dt><dd>One-line answer.</dd></div></dl>
+      <h4>Common mistakes</h4><ul class="mistakes"><li>…</li></ul>
+      <aside class="callout tip"><span class="callout-label">Interview tip</span><p>…</p></aside>
+      <aside class="callout confidence"><span class="callout-label">Confidence note</span><p>…</p></aside>
+    </section>
+    <p class="sources">Sources: …</p>
+  </div>
+</article>
+```
+
+Diagram figure: `<figure class="diagram-fig"><div class="diagram-scroll" tabindex="0" role="group" aria-label="Diagram: …. Scrollable on small screens."><svg class="diagram" viewBox="0 0 760 300" role="img" aria-labelledby="ID-d1-t ID-d1-d"><title id="ID-d1-t">…</title><desc id="ID-d1-d">…</desc> … </svg></div><figcaption>…</figcaption><button class="replay" type="button" aria-label="Replay diagram animation">Replay</button></figure>`
+
+SVG parts (styled by shared CSS; set `style="--i:N"` for the order things appear, N = 0,1,2…):
+- **Node:** `<g class="d-node VARIANT" style="--i:0"><rect x y width height/><text class="d-text" x y text-anchor="middle">Name</text><text class="d-sub" …>small note</text></g>`. Always exactly one plain `<rect>` (no `rx`); the page's JS turns it into a blocky pixel block. Variants: (none) = stone, generic box such as a load balancer or external site; `grass` = client / user / browser; `cmd` = app server or service doing the logic; `chest` = database or file storage; `gem` = cache; `furnace` = queue, worker, counter or background job. Node titles use a pixel font: keep them short (≤12 characters per line; split into two `d-text` lines if needed) and keep `d-sub` notes to ~20 characters for a 150-wide node.
+- **Edge:** `<path class="d-edge [accent]" style="--i:1" d="…"/>` plus arrowhead `<path class="d-arrow [accent]" style="--i:1" d="M x1 y1 L x2 y2 L x3 y3 Z"/>`. Use right-angle paths (H/V). `accent` = the main/hot path (bright redstone). Never dashed edges (the draw-in animation uses dasharray).
+- **Lifeline** (sequence diagrams): `<path class="d-line" style="--i:0" d="M x y1 V y2"/>`.
+- **Label:** `<text class="d-label" style="--i:2" …>`.
+- **Packet** (a small item square moving along a path; time is driven by the SVG timeline, so use static `begin` offsets):
+  `<rect class="d-packet" x="-6" y="-6" width="12" height="12" opacity="0"><animateMotion dur="7s" begin="1s" repeatCount="indefinite" keyPoints="0;1;1" keyTimes="0;.7;1" calcMode="linear" path="M…"/><animate attributeName="opacity" dur="7s" begin="1s" repeatCount="indefinite" values="0;1;1;0;0" keyTimes="0;.02;.68;.7;1"/></rect>`
+  Add class `alt` (cyan) or `red` for a second kind of packet, and say what each colour means in a label or the caption. Keep all packets in one diagram on the same `dur`. A request-flow diagram can use one continuous path that zig-zags along the messages.
+- Keep text ≥ 12px in user units and labels clear of nodes and edges. On narrow screens the diagram scrolls sideways (min-width set in CSS).
+
+## Run checklist
+
+1. List existing topics, patterns, dates and levels → choose a new topic, a pattern different from the last two, and the right level.
+2. Research with web search/fetch (Hello Interview breakdown if one exists, plus one more reputable source). Decide what to hedge.
+3. Write the entry (Legend, all required sections in order, 2-3 diagrams) + TOC line, copying the newest entry's markup.
+4. `python scripts/validate.py` → fix until OK.
+5. Commit with the message format and trailers above, then `git push origin HEAD:main`.
