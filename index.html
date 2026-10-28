@@ -420,6 +420,7 @@ dfn.term{font-style:normal;border-bottom:2px dotted var(--accent);cursor:help}
       <h2><svg viewBox="0 0 12 12" aria-hidden="true"><path fill="#7A4A2A" d="M0 2h12v9H0z"/><path fill="#A86A3C" d="M1 3h10v3H1zM1 7h10v3H1z"/><path fill="#E9B526" d="M5 5h2v3H5z"/><path fill="#4A2C18" d="M0 6h5v1H0zM7 6h5v1H7z"/></svg>Archive</h2>
       <ol class="toc">
         <!-- TOC -->
+        <li><a href="#2026-10-28-rate-limiter"><time datetime="2026-10-28">2026-10-28</time><span>Rate limiter: counting fairly across many servers</span></a></li>
         <li><a href="#2026-10-27-url-shortener"><time datetime="2026-10-27">2026-10-27</time><span>URL shortener: one lookup, billions of clicks</span></a></li>
       </ol>
     </nav>
@@ -428,6 +429,249 @@ dfn.term{font-style:normal;border-bottom:2px dotted var(--accent);cursor:help}
 
   <main id="entries" tabindex="-1">
     <!-- ENTRIES -->
+    <article class="entry" id="2026-10-28-rate-limiter" data-topic="Rate limiter" data-domain="Counters &amp; limits" data-date="2026-10-28" data-level="1">
+      <header class="entry-head">
+        <div class="entry-meta">
+          <span class="chip">Counters &amp; limits</span>
+          <span class="level" title="Difficulty: level 1 of 3">Lv 1</span>
+          <time datetime="2026-10-28">28 Oct 2026</time>
+          <span class="read"><span class="read-time">4</span> min read</span>
+        </div>
+        <h2 class="entry-title">Design a rate limiter</h2>
+        <p class="lede">A free weather API lets each app make 100 calls a minute. Call 101 gets a polite "slow down". A rate limiter is that bouncer. The feature is tiny, but it tests counting, sharing one count across servers, and what happens when the counter breaks.</p>
+        <nav class="steps" aria-label="Sections of this design">
+          <a href="#2026-10-28-rate-limiter-sec-functional">Features</a>
+          <a href="#2026-10-28-rate-limiter-sec-nonfunctional">Qualities</a>
+          <a href="#2026-10-28-rate-limiter-sec-entities">Entities</a>
+          <a href="#2026-10-28-rate-limiter-sec-api">API</a>
+          <a href="#2026-10-28-rate-limiter-sec-hld">Design</a>
+          <a href="#2026-10-28-rate-limiter-sec-deepdives">Deep dives</a>
+          <a href="#2026-10-28-rate-limiter-sec-tips">Tips</a>
+        </nav>
+      </header>
+
+      <div class="prose">
+        <details class="legend">
+          <summary>Legend <span class="hint">7 terms used below</span></summary>
+          <dl>
+            <div><dt>Rate limit</dt><dd>The most requests a client may send in a period of time, for example 100 per minute.</dd></div>
+            <div><dt>429</dt><dd>The HTTP status code "Too Many Requests". It tells the client it was blocked for sending too much, not that the server is broken.</dd></div>
+            <div><dt>API gateway</dt><dd>The single front door of a system. It receives every request and sends each one to the right service.</dd></div>
+            <div><dt>Token bucket</dt><dd>A counting method: a bucket holds tokens, each request takes one, and tokens drip back in at a steady speed. No token means no request.</dd></div>
+            <div><dt>Redis</dt><dd>A very fast database that keeps its data in memory. It is often used for counters and caches.</dd></div>
+            <div><dt>Atomic</dt><dd>Done as one indivisible step. Nothing else can sneak in halfway through.</dd></div>
+            <div><dt>Fail open</dt><dd>When a safety check breaks, let requests through instead of blocking everyone.</dd></div>
+          </dl>
+        </details>
+
+        <section class="sec reveal" id="2026-10-28-rate-limiter-sec-functional">
+          <h3>Functional requirements</h3>
+          <ul class="reqs">
+            <li>Limit how many requests one client can make in a time window, per user (or per IP when not logged in).</li>
+            <li>Reject extra requests with a clear error that says when to try again.</li>
+            <li>Let admins set different limits for different endpoints.</li>
+          </ul>
+          <p class="out">Out of scope: defending against large attacks (DDoS), paid pricing tiers, per-country rules.</p>
+        </section>
+
+        <section class="sec reveal" id="2026-10-28-rate-limiter-sec-nonfunctional">
+          <h3>Non-functional requirements</h3>
+          <ul class="reqs nfr">
+            <li><strong>Fast.</strong> The check runs on every single request, so it may add only a few milliseconds.</li>
+            <li><strong>Same limit on every server.</strong> If each server counts alone, five servers allow five times the limit.</li>
+            <li><strong>Available.</strong> A broken limiter must not take the API down with it.</li>
+          </ul>
+        </section>
+
+        <section class="sec reveal" id="2026-10-28-rate-limiter-sec-entities">
+          <h3>Core entities</h3>
+          <ul class="entities">
+            <li><strong>Rule:</strong> an endpoint, how many requests it allows, and over how many seconds.</li>
+            <li><strong>Bucket:</strong> one per client and endpoint, holding how many tokens are left and when it last refilled.</li>
+          </ul>
+        </section>
+
+        <section class="sec reveal" id="2026-10-28-rate-limiter-sec-api">
+          <h3>API design</h3>
+          <div class="api-list">
+            <div class="api">
+              <div class="api-sig"><span class="method get">GET</span><code>/weather</code></div>
+              <p>Any protected endpoint. The limiter sits in front of all of them and adds headers.</p>
+              <div class="io">
+                <div><span class="io-l">Response 200 OK</span><pre>X-RateLimit-Remaining: 42
+{ "temp_c": 27 }</pre></div>
+                <div><span class="io-l">Response 429 Too Many Requests</span><pre>Retry-After: 12
+{ "error": "rate_limited" }</pre></div>
+              </div>
+            </div>
+            <div class="api">
+              <div class="api-sig"><span class="method put">PUT</span><code>/rules/{endpoint}</code></div>
+              <p>Admin only. Create or replace the limit for one endpoint.</p>
+              <div class="io">
+                <div><span class="io-l">Request body</span><pre>{
+  "limit": 100,
+  "window_seconds": 60
+}</pre></div>
+                <div><span class="io-l">Response 200 OK</span><pre>{ "endpoint": "weather" }</pre></div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="sec" id="2026-10-28-rate-limiter-sec-hld">
+          <h3>High-level design</h3>
+          <div class="reveal">
+            <p>We build it one requirement at a time. Assume the usual setup: identical servers that keep no data, behind a load balancer.</p>
+            <h4>1. Limiting a client</h4>
+            <p>Every request first meets the limiter. It builds a key from the user id in the auth token plus the endpoint (the IP if there is no token) and asks a shared counter store whether to go ahead. If not, the client gets a <dfn class="term" title="HTTP status 'Too Many Requests'.">429</dfn> with a <code>Retry-After</code> header.</p>
+            <p>Counters must be shared, so they live in <dfn class="term" title="A very fast in-memory database, often used for counters and caches.">Redis</dfn>, not in each server's memory. Assume 10,000 requests a second. That is 10,000 Redis calls a second, and one Redis handles roughly 100,000, so one primary is enough. A million clients at about 100 bytes each is only 100 MB.</p>
+            <h4>2. Different limits per endpoint</h4>
+            <p>Admins call <code>PUT /rules/{endpoint}</code> and we save a row. Rules change rarely, so the limiter keeps a copy in memory and refreshes it every minute.</p>
+            <div class="table-scroll">
+              <table class="schema">
+                <caption>Table: rules</caption>
+                <thead><tr><th>Column</th><th>Type</th><th>Note</th></tr></thead>
+                <tbody>
+                  <tr><td>endpoint</td><td>text</td><td>primary key, e.g. weather</td></tr>
+                  <tr><td>limit</td><td>int</td><td>requests allowed per window</td></tr>
+                  <tr><td>window_seconds</td><td>int</td><td>length of the window</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <figure class="diagram-fig">
+            <div class="diagram-scroll" tabindex="0" role="group" aria-label="Diagram: rate limiter architecture. Scrollable on small screens.">
+              <svg class="diagram" viewBox="0 0 760 320" role="img" aria-labelledby="2026-10-28-rate-limiter-d1-t 2026-10-28-rate-limiter-d1-d">
+                <title id="2026-10-28-rate-limiter-d1-t">Rate limiter architecture</title>
+                <desc id="2026-10-28-rate-limiter-d1-d">A client sends requests to a rate limiter. The limiter takes a token from a Redis store of buckets and, if a token is left, passes the request on to the backend API. Otherwise it answers 429.</desc>
+                <g class="d-node grass" style="--i:0"><rect x="20" y="118" width="110" height="60"/><text class="d-text" x="75" y="152" text-anchor="middle">Client</text><text class="d-sub" x="75" y="168" text-anchor="middle">app / browser</text></g>
+                <path class="d-edge accent" style="--i:1" d="M130 148H190"/><path class="d-arrow accent" style="--i:1" d="M184 142L192 148L184 154Z"/>
+                <g class="d-node cmd" style="--i:2"><rect x="190" y="94" width="190" height="108"/><text class="d-text" x="285" y="124" text-anchor="middle">Rate limiter</text><text class="d-item" x="204" y="150">- key = user + endpoint</text><text class="d-item" x="204" y="170">- take a token</text><text class="d-item" x="204" y="190">- none left: reply 429</text></g>
+                <path class="d-edge accent" style="--i:3" d="M380 148H580"/><path class="d-arrow accent" style="--i:3" d="M574 142L582 148L574 154Z"/>
+                <text class="d-label" style="--i:3" x="480" y="138" text-anchor="middle">if allowed</text>
+                <g class="d-node cmd" style="--i:4"><rect x="580" y="113" width="170" height="70"/><text class="d-text" x="665" y="143" text-anchor="middle">Backend API</text><text class="d-item" x="594" y="169">- does the real work</text></g>
+                <g class="d-node furnace" style="--i:5"><rect x="190" y="248" width="140" height="60"/><text class="d-text" x="260" y="274" text-anchor="middle">Redis</text><text class="d-sub" x="260" y="294" text-anchor="middle">token buckets</text></g>
+                <path class="d-edge" style="--i:5" d="M260 202V248"/><path class="d-arrow" style="--i:5" d="M254 208L260 200L266 208Z"/><path class="d-arrow" style="--i:5" d="M254 242L260 250L266 242Z"/>
+                <text class="d-label" style="--i:5" x="272" y="230">take a token</text>
+                <path class="d-line" style="--i:5" d="M330 278H380"/>
+                <g class="d-note" style="--i:5"><rect x="380" y="224" width="200" height="90"/><text class="d-note-t" x="392" y="244">bucket</text><text class="d-mono" x="392" y="264">key  user:endpoint</text><text class="d-mono" x="392" y="282">tokens</text><text class="d-mono" x="392" y="300">last_refill</text></g>
+                <rect class="d-packet alt" x="-6" y="-6" width="12" height="12" opacity="0"><animateMotion dur="6s" begin="1.2s" repeatCount="indefinite" keyPoints="0;1;1" keyTimes="0;.6;1" calcMode="linear" path="M130 148H580"/><animate attributeName="opacity" dur="6s" begin="1.2s" repeatCount="indefinite" values="0;1;1;0;0" keyTimes="0;.02;.58;.6;1"/></rect>
+              </svg>
+            </div>
+            <figcaption>Every request meets the limiter first. Only requests that get a token reach the backend. Cyan = an allowed request.</figcaption>
+            <button class="replay" type="button" aria-label="Replay diagram animation">Replay</button>
+          </figure>
+
+          <aside class="callout why reveal">
+            <span class="callout-label">Why</span>
+            <p><strong>Why block at the front?</strong> Turning a request away costs one cheap lookup; letting it in costs the full work of the API. And 429 tells the client the problem is its own speed.</p>
+          </aside>
+        </section>
+
+        <section class="sec" id="2026-10-28-rate-limiter-sec-deepdives">
+          <h3>Deep dives</h3>
+          <div class="dive reveal">
+            <h4>How do we count requests?</h4>
+            <p>Three common ways to decide if one more request fits:</p>
+            <ol class="options">
+              <li><strong>Fixed window.</strong> One counter per client per minute, reset when the minute ends. Simple, but 100 requests at 12:00:59 plus 100 at 12:01:00 means 200 in two seconds.</li>
+              <li><strong>Sliding log.</strong> Store the time of every request and count those in the last minute. Exact, but memory-hungry.</li>
+              <li class="pick"><strong>Token bucket.</strong><span class="pick-tag">Pick</span> A <dfn class="term" title="A bucket of tokens that refills at a steady speed; each request takes one.">bucket</dfn> holds up to 100 tokens and refills at 100 per minute. Each request takes one token; empty means 429. Short bursts are fine, the long-run rate stays capped, and we store just two numbers.</li>
+            </ol>
+            <p>No timer is needed: each request works out from <code>last_refill</code> how many tokens dripped in, and adds them.</p>
+          </div>
+
+          <div class="dive reveal">
+            <h4>How do we count correctly across servers?</h4>
+            <p>Two servers may touch the same bucket in the same instant.</p>
+            <ol class="options">
+              <li><strong>Count in each server's memory.</strong> Fast, but the limit multiplies by the server count.</li>
+              <li><strong>Shared Redis, read then write.</strong> Two servers both read "1 token left" and both allow.</li>
+              <li class="pick"><strong>Shared Redis, one atomic step.</strong><span class="pick-tag">Pick</span> A short Lua script inside Redis reads, refills, takes a token and writes back. Redis runs one script at a time, so it is <dfn class="term" title="Done as one indivisible step that nothing can interrupt.">atomic</dfn>. Cost: one hop of about a millisecond.</li>
+            </ol>
+            <p>Give each bucket key an expiry (TTL) of about a full refill. An idle bucket is full anyway, so deleting it loses nothing.</p>
+          </div>
+
+          <div class="reveal">
+            <h4>Final design</h4>
+            <p>The dives added atomic token buckets in Redis. The gateway routes by path to services split by job: the limit service sits on every request, while the rules service handles rare admin changes.</p>
+            <p>Redis has a replica that takes over if the primary dies, and the rules database has one too. If Redis is still unreachable, the limiter fails open: requests pass and an alert fires.</p>
+          </div>
+
+          <figure class="diagram-fig" id="2026-10-28-rate-limiter-final">
+            <div class="diagram-scroll" tabindex="0" role="group" aria-label="Diagram: the final rate limiter design. Scrollable on small screens.">
+              <svg class="diagram" viewBox="0 0 760 420" role="img" aria-labelledby="2026-10-28-rate-limiter-d2-t 2026-10-28-rate-limiter-d2-d">
+                <title id="2026-10-28-rate-limiter-d2-t">Final rate limiter design</title>
+                <desc id="2026-10-28-rate-limiter-d2-d">A client talks to an API gateway. For every request the gateway asks the limit service whether to allow it. The limit service keeps rules cached in memory, refreshed from the rules service, and takes a token from a Redis bucket with an atomic script. Allowed requests go on to the backend API. Admin PUT rules requests go to the rules service, which saves them in a rules table.</desc>
+                <g class="d-node grass" style="--i:0"><rect x="10" y="175" width="80" height="60"/><text class="d-text" x="50" y="210" text-anchor="middle">Client</text></g>
+                <path class="d-edge" style="--i:1" d="M90 205H110"/><path class="d-arrow" style="--i:1" d="M104 199L112 205L104 211Z"/><path class="d-arrow" style="--i:1" d="M96 199L88 205L96 211Z"/>
+                <g class="d-node" style="--i:1"><rect x="110" y="50" width="130" height="310"/><text class="d-text" x="175" y="160" text-anchor="middle">API</text><text class="d-text" x="175" y="178" text-anchor="middle">gateway</text><text class="d-item" x="122" y="206">- one front door</text><text class="d-item" x="122" y="226">- route by path</text><text class="d-item" x="122" y="246">- relays replies</text></g>
+                <path class="d-edge accent" style="--i:2" d="M240 70H330"/><path class="d-arrow accent" style="--i:2" d="M324 64L332 70L324 76Z"/><path class="d-arrow accent" style="--i:2" d="M246 64L238 70L246 76Z"/>
+                <text class="d-label" style="--i:2" x="285" y="60" text-anchor="middle">check limit</text>
+                <path class="d-edge" style="--i:2" d="M240 210H330"/><path class="d-arrow" style="--i:2" d="M324 204L332 210L324 216Z"/><path class="d-arrow" style="--i:2" d="M246 204L238 210L246 216Z"/>
+                <text class="d-label" style="--i:2" x="285" y="200" text-anchor="middle">PUT /rules</text>
+                <path class="d-edge accent" style="--i:2" d="M240 340H330"/><path class="d-arrow accent" style="--i:2" d="M324 334L332 340L324 346Z"/><path class="d-arrow accent" style="--i:2" d="M246 334L238 340L246 346Z"/>
+                <text class="d-label" style="--i:2" x="285" y="330" text-anchor="middle">GET /api/*</text>
+                <g class="d-node cmd" style="--i:3"><rect x="330" y="20" width="180" height="104"/><text class="d-text" x="420" y="50" text-anchor="middle">Limit service</text><text class="d-item" x="344" y="76">- rules cached, 60 s</text><text class="d-item" x="344" y="96">- take a token, atomic</text><text class="d-item" x="344" y="116">- answer allow / block</text></g>
+                <g class="d-node cmd" style="--i:3"><rect x="330" y="160" width="180" height="104"/><text class="d-text" x="420" y="190" text-anchor="middle">Rules service</text><text class="d-item" x="344" y="216">- admins set limits</text><text class="d-item" x="344" y="236">- save the rule</text><text class="d-item" x="344" y="256">- serve rules on refresh</text></g>
+                <g class="d-node cmd" style="--i:3"><rect x="330" y="300" width="180" height="80"/><text class="d-text" x="420" y="330" text-anchor="middle">Backend API</text><text class="d-item" x="344" y="356">- does the real work</text></g>
+                <path class="d-edge" style="--i:4" d="M420 124V160"/><path class="d-arrow" style="--i:4" d="M414 130L420 122L426 130Z"/><path class="d-arrow" style="--i:4" d="M414 154L420 162L426 154Z"/>
+                <text class="d-label" style="--i:4" x="432" y="146">get rules</text>
+                <g class="d-node furnace" style="--i:5"><rect x="610" y="20" width="140" height="60"/><text class="d-text" x="680" y="46" text-anchor="middle">Redis</text><text class="d-sub" x="680" y="66" text-anchor="middle">token buckets</text></g>
+                <path class="d-edge accent" style="--i:5" d="M510 50H610"/><path class="d-arrow accent" style="--i:5" d="M604 44L612 50L604 56Z"/><path class="d-arrow accent" style="--i:5" d="M516 44L508 50L516 56Z"/>
+                <text class="d-label" style="--i:5" x="560" y="40" text-anchor="middle">take token</text>
+                <path class="d-line" style="--i:5" d="M680 80V100"/>
+                <g class="d-note" style="--i:5"><rect x="560" y="100" width="190" height="108"/><text class="d-note-t" x="572" y="120">bucket</text><text class="d-mono" x="572" y="140">key  user:endpoint</text><text class="d-mono" x="572" y="158">tokens</text><text class="d-mono" x="572" y="176">last_refill</text><text class="d-mono" x="572" y="194">TTL  60 s idle</text></g>
+                <g class="d-node chest" style="--i:6"><rect x="610" y="230" width="140" height="60"/><text class="d-text" x="680" y="256" text-anchor="middle">Rules DB</text><text class="d-sub" x="680" y="276" text-anchor="middle">primary + replica</text></g>
+                <path class="d-edge" style="--i:6" d="M510 250H610"/><path class="d-arrow" style="--i:6" d="M604 244L612 250L604 256Z"/>
+                <text class="d-label" style="--i:6" x="560" y="240" text-anchor="middle">save rule</text>
+                <path class="d-line" style="--i:6" d="M680 290V310"/>
+                <g class="d-note" style="--i:6"><rect x="560" y="310" width="190" height="90"/><text class="d-note-t" x="572" y="330">rules table</text><text class="d-mono" x="572" y="350">endpoint  PK</text><text class="d-mono" x="572" y="368">limit</text><text class="d-mono" x="572" y="386">window_seconds</text></g>
+                <rect class="d-packet alt" x="-6" y="-6" width="12" height="12" opacity="0"><animateMotion dur="8s" begin="1.6s" repeatCount="indefinite" keyPoints="0;1;1" keyTimes="0;.4;1" calcMode="linear" path="M90 205H175V70H330V50H610"/><animate attributeName="opacity" dur="8s" begin="1.6s" repeatCount="indefinite" values="0;1;1;0;0" keyTimes="0;.02;.38;.4;1"/></rect>
+                <rect class="d-packet" x="-6" y="-6" width="12" height="12" opacity="0"><animateMotion dur="8s" begin="1.6s" repeatCount="indefinite" keyPoints="0;0;1;1" keyTimes="0;.5;.9;1" calcMode="linear" path="M90 205H175V210H330V250H610"/><animate attributeName="opacity" dur="8s" begin="1.6s" repeatCount="indefinite" values="0;0;1;1;0;0" keyTimes="0;.5;.51;.89;.9;1"/></rect>
+              </svg>
+            </div>
+            <figcaption>The complete system. Cyan = an ordinary request being checked, gold = an admin saving a new rule. The signs show what Redis and the database hold.</figcaption>
+            <button class="replay" type="button" aria-label="Replay diagram animation">Replay</button>
+          </figure>
+
+          <div class="next reveal">
+            <h4>What you could add next</h4>
+            <ul class="next-list">
+              <li>Different limits for free and paid users.</li>
+              <li>Split Redis by client key (sharding) once one primary can't keep up.</li>
+              <li>Let each limiter server allow a few requests from a local count first, to cut Redis calls.</li>
+            </ul>
+          </div>
+        </section>
+
+        <section class="sec reveal" id="2026-10-28-rate-limiter-sec-tips">
+          <h3>Interview tips</h3>
+          <dl class="qa">
+            <div><dt>Limit by user or by IP?</dt><dd>User id from the token if present, else IP (an office can share one IP).</dd></div>
+            <div><dt>Where should the limiter live?</dt><dd>In the gateway, so every service is covered in one place.</dd></div>
+            <div><dt>What if Redis goes down?</dt><dd>Fail open and alert; for login attempts you may fail closed.</dd></div>
+          </dl>
+          <h4>Common mistakes</h4>
+          <ul class="mistakes">
+            <li>Counting in each server's memory, so the real limit grows with the server count.</li>
+            <li>Reading the count and writing it back as two steps, which lets a burst slip through.</li>
+            <li>Rejecting with no <code>Retry-After</code>, so clients retry at once.</li>
+          </ul>
+          <aside class="callout tip">
+            <span class="callout-label">Interview tip</span>
+            <p>Name two or three counting methods, pick one, and say what you give up. That comparison is the heart of this question.</p>
+          </aside>
+          <aside class="callout confidence">
+            <span class="callout-label">Confidence note</span>
+            <p>The traffic numbers (10,000 requests a second, a million clients) are assumptions. All three counting methods are accepted; explain the trade-off and keep counting atomic.</p>
+          </aside>
+        </section>
+
+        <p class="sources">Sources: Alex Xu, <em>System Design Interview</em> (Vol. 1), rate limiter chapter; Redis docs, <a href="https://redis.io/docs/latest/commands/incr/">INCR (rate limiter pattern)</a> and <a href="https://redis.io/docs/latest/develop/interact/programmability/eval-intro/">scripting with Lua</a>; MDN, <a href="https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/429">429 Too Many Requests</a>; Hello Interview, <a href="https://www.hellointerview.com/learn/system-design/in-a-hurry/delivery">delivery framework</a>.</p>
+      </div>
+    </article>
     <article class="entry" id="2026-10-27-url-shortener" data-topic="URL shortener" data-domain="Read-heavy lookup" data-date="2026-10-27" data-level="1">
       <header class="entry-head">
         <div class="entry-meta">
