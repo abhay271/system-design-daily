@@ -420,6 +420,7 @@ dfn.term{font-style:normal;border-bottom:2px dotted var(--accent);cursor:help}
       <h2><svg viewBox="0 0 12 12" aria-hidden="true"><path fill="#7A4A2A" d="M0 2h12v9H0z"/><path fill="#A86A3C" d="M1 3h10v3H1zM1 7h10v3H1z"/><path fill="#E9B526" d="M5 5h2v3H5z"/><path fill="#4A2C18" d="M0 6h5v1H0zM7 6h5v1H7z"/></svg>Archive</h2>
       <ol class="toc">
         <!-- TOC -->
+        <li><a href="#2026-10-29-pastebin"><time datetime="2026-10-29">2026-10-29</time><span>Pastebin: a tiny record plus a big blob</span></a></li>
         <li><a href="#2026-10-28-rate-limiter"><time datetime="2026-10-28">2026-10-28</time><span>Rate limiter: counting fairly across many servers</span></a></li>
         <li><a href="#2026-10-27-url-shortener"><time datetime="2026-10-27">2026-10-27</time><span>URL shortener: one lookup, billions of clicks</span></a></li>
       </ol>
@@ -429,6 +430,258 @@ dfn.term{font-style:normal;border-bottom:2px dotted var(--accent);cursor:help}
 
   <main id="entries" tabindex="-1">
     <!-- ENTRIES -->
+    <article class="entry" id="2026-10-29-pastebin" data-topic="Pastebin" data-domain="Media &amp; files" data-date="2026-10-29" data-level="1">
+      <header class="entry-head">
+        <div class="entry-meta">
+          <span class="chip">Media &amp; files</span>
+          <span class="level" title="Difficulty: level 1 of 3">Lv 1</span>
+          <time datetime="2026-10-29">29 Oct 2026</time>
+          <span class="read"><span class="read-time">4</span> min read</span>
+        </div>
+        <h2 class="entry-title">Design a pastebin</h2>
+        <p class="lede">You have 200 lines of error log to show a teammate. Pasting them into chat is messy, so you paste them into a website, get a short link, and send the link. That is a pastebin. It is a good first question because it stores two different kinds of data: a tiny record and a big chunk of text.</p>
+        <nav class="steps" aria-label="Sections of this design">
+          <a href="#2026-10-29-pastebin-sec-functional">Features</a>
+          <a href="#2026-10-29-pastebin-sec-nonfunctional">Qualities</a>
+          <a href="#2026-10-29-pastebin-sec-entities">Entities</a>
+          <a href="#2026-10-29-pastebin-sec-api">API</a>
+          <a href="#2026-10-29-pastebin-sec-hld">Design</a>
+          <a href="#2026-10-29-pastebin-sec-deepdives">Deep dives</a>
+          <a href="#2026-10-29-pastebin-sec-tips">Tips</a>
+        </nav>
+      </header>
+
+      <div class="prose">
+        <details class="legend">
+          <summary>Legend <span class="hint">6 terms used below</span></summary>
+          <dl>
+            <div><dt>410 Gone</dt><dd>The HTTP status code for "this existed once, but it is gone for good". It differs from 404, which means "never heard of it".</dd></div>
+            <div><dt>API gateway</dt><dd>The single front door of a system. It receives every request and sends each one to the right service.</dd></div>
+            <div><dt>Replica</dt><dd>A copy of a database that is kept up to date. Reads can use it, and it takes over if the main copy (the primary) dies.</dd></div>
+            <div><dt>Blob storage</dt><dd>A cheap file store for large data, such as Amazon S3. It keeps copies in several places and you fetch each file by its key.</dd></div>
+            <div><dt>Cache</dt><dd>A small, very fast memory store that holds answers we gave recently, so we skip the slower work next time.</dd></div>
+            <div><dt>TTL</dt><dd>Time to live. How long a cache entry may stay before it is deleted automatically.</dd></div>
+          </dl>
+        </details>
+
+        <section class="sec reveal" id="2026-10-29-pastebin-sec-functional">
+          <h3>Functional requirements</h3>
+          <ul class="reqs">
+            <li>Paste some text and get back a short link.</li>
+            <li>Open the link to read that text.</li>
+            <li>Optionally choose when a paste expires.</li>
+          </ul>
+          <p class="out">Out of scope: accounts, editing a paste, syntax colours, search.</p>
+        </section>
+
+        <section class="sec reveal" id="2026-10-29-pastebin-sec-nonfunctional">
+          <h3>Non-functional requirements</h3>
+          <ul class="reqs nfr">
+            <li><strong>Fast reads.</strong> A link is opened many more times than it is created, so opening must feel instant.</li>
+            <li><strong>Durable.</strong> People share logs and code. A paste must not vanish before it expires.</li>
+            <li><strong>Unique, hard-to-guess links.</strong> Two pastes must never share a link, and a stranger should not be able to guess yours.</li>
+          </ul>
+        </section>
+
+        <section class="sec reveal" id="2026-10-29-pastebin-sec-entities">
+          <h3>Core entities</h3>
+          <ul class="entities">
+            <li><strong>Paste:</strong> a small record with the id, created time, expiry time and where its text is kept.</li>
+            <li><strong>Text:</strong> the pasted content itself, capped at 1 MB (an assumed limit).</li>
+          </ul>
+        </section>
+
+        <section class="sec reveal" id="2026-10-29-pastebin-sec-api">
+          <h3>API design</h3>
+          <div class="api-list">
+            <div class="api">
+              <div class="api-sig"><span class="method">POST</span><code>/pastes</code></div>
+              <p>Create a paste. Text over 1 MB is rejected with 413 Content Too Large.</p>
+              <div class="io">
+                <div><span class="io-l">Request body</span><pre>{
+  "content": "ERROR at line 42 ...",
+  "expires_in_days": 7
+}</pre></div>
+                <div><span class="io-l">Response 201 Created</span><pre>{
+  "id": "aZ3kQ9xT",
+  "url": "https://paste.example/aZ3kQ9xT"
+}</pre></div>
+              </div>
+            </div>
+            <div class="api">
+              <div class="api-sig"><span class="method get">GET</span><code>/pastes/{id}</code></div>
+              <p>Read a paste. 404 means no such id. 410 means it existed but has expired.</p>
+              <div class="io">
+                <div><span class="io-l">Response 200 OK</span><pre>{
+  "content": "ERROR at line 42 ...",
+  "created_at": "2026-10-29T08:00:00Z"
+}</pre></div>
+                <div><span class="io-l">Response 410 Gone</span><pre>{ "error": "expired" }</pre></div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="sec" id="2026-10-29-pastebin-sec-hld">
+          <h3>High-level design</h3>
+          <div class="reveal">
+            <p>Assume the usual setup: identical app servers that keep no data, behind a load balancer. Assume 1 million new pastes a day (about 12 a second) and 10 reads per paste (about 120 a second). At 10 KB each, that is 10 GB of new text a day, so the text stays out of the database.</p>
+            <h4>1. Creating a paste</h4>
+            <p>The server makes an 8-character id from 62 symbols (a-z, A-Z, 0-9). That gives about 218 trillion ids, so a random one is almost never taken; if the database refuses a duplicate key, we draw again. Then it saves the text and a small row, and returns 201.</p>
+            <div class="table-scroll">
+              <table class="schema">
+                <caption>Table: pastes</caption>
+                <thead><tr><th>Column</th><th>Type</th><th>Note</th></tr></thead>
+                <tbody>
+                  <tr><td>id</td><td>text</td><td>primary key, the random 8 characters</td></tr>
+                  <tr><td>blob_key</td><td>text</td><td>where the text is stored</td></tr>
+                  <tr><td>created_at</td><td>timestamp</td><td>when it was pasted</td></tr>
+                  <tr><td>expires_at</td><td>timestamp</td><td>empty means never expires</td></tr>
+                </tbody>
+              </table>
+            </div>
+            <h4>2. Reading a paste</h4>
+            <p>Look up the row by id. No row means 404. An <code>expires_at</code> in the past means <dfn class="term" title="Status code for: it existed once, but is gone for good.">410</dfn>. Otherwise fetch the text by its key and return 200.</p>
+          </div>
+
+          <figure class="diagram-fig">
+            <div class="diagram-scroll" tabindex="0" role="group" aria-label="Diagram: pastebin architecture. Scrollable on small screens.">
+              <svg class="diagram" viewBox="0 0 760 430" role="img" aria-labelledby="2026-10-29-pastebin-d1-t 2026-10-29-pastebin-d1-d">
+                <title id="2026-10-29-pastebin-d1-t">Pastebin architecture</title>
+                <desc id="2026-10-29-pastebin-d1-d">A client sends requests to a paste app. The app saves and reads a small row in a metadata database and saves and reads the pasted text in blob storage. Signs beside each store show what it holds.</desc>
+                <g class="d-node grass" style="--i:0"><rect x="10" y="172" width="100" height="60"/><text class="d-text" x="60" y="207" text-anchor="middle">Client</text></g>
+                <path class="d-edge accent" style="--i:1" d="M110 202H170"/><path class="d-arrow accent" style="--i:1" d="M164 196L172 202L164 208Z"/><path class="d-arrow accent" style="--i:1" d="M116 196L108 202L116 208Z"/>
+                <text class="d-label" style="--i:1" x="140" y="192" text-anchor="middle">paste</text>
+                <g class="d-node cmd" style="--i:2"><rect x="170" y="148" width="190" height="108"/><text class="d-text" x="265" y="178" text-anchor="middle">Paste app</text><text class="d-item" x="184" y="204">- make a random id</text><text class="d-item" x="184" y="224">- save text + row</text><text class="d-item" x="184" y="244">- read both back</text></g>
+                <path class="d-edge accent" style="--i:3" d="M360 170H440V50H540"/><path class="d-arrow accent" style="--i:3" d="M534 44L542 50L534 56Z"/><path class="d-arrow accent" style="--i:3" d="M366 164L358 170L366 176Z"/>
+                <text class="d-label" style="--i:3" x="450" y="40">row in/out</text>
+                <path class="d-edge accent" style="--i:3" d="M360 236H440V300H540"/><path class="d-arrow accent" style="--i:3" d="M534 294L542 300L534 306Z"/><path class="d-arrow accent" style="--i:3" d="M366 230L358 236L366 242Z"/>
+                <text class="d-label" style="--i:3" x="450" y="320">text in/out</text>
+                <g class="d-node chest" style="--i:4"><rect x="540" y="20" width="210" height="60"/><text class="d-text" x="645" y="46" text-anchor="middle">Metadata DB</text><text class="d-sub" x="645" y="66" text-anchor="middle">one small row each</text></g>
+                <path class="d-line" style="--i:4" d="M645 80V96"/>
+                <g class="d-note" style="--i:4"><rect x="540" y="96" width="190" height="108"/><text class="d-note-t" x="552" y="116">pastes table</text><text class="d-mono" x="552" y="136">id  PK</text><text class="d-mono" x="552" y="154">blob_key</text><text class="d-mono" x="552" y="172">created_at</text><text class="d-mono" x="552" y="190">expires_at</text></g>
+                <g class="d-node chest" style="--i:5"><rect x="540" y="270" width="210" height="60"/><text class="d-text" x="645" y="296" text-anchor="middle">Blob storage</text><text class="d-sub" x="645" y="316" text-anchor="middle">the pasted text</text></g>
+                <path class="d-line" style="--i:5" d="M645 330V346"/>
+                <g class="d-note" style="--i:5"><rect x="540" y="346" width="190" height="72"/><text class="d-note-t" x="552" y="366">text file</text><text class="d-mono" x="552" y="386">key  blob_key</text><text class="d-mono" x="552" y="404">value  up to 1 MB</text></g>
+                <rect class="d-packet" x="-6" y="-6" width="12" height="12" opacity="0"><animateMotion dur="6s" begin="1.2s" repeatCount="indefinite" keyPoints="0;1;1" keyTimes="0;.6;1" calcMode="linear" path="M110 202H265H440V50H540"/><animate attributeName="opacity" dur="6s" begin="1.2s" repeatCount="indefinite" values="0;1;1;0;0" keyTimes="0;.02;.58;.6;1"/></rect>
+              </svg>
+            </div>
+            <figcaption>One app tier keeps a small row in the database and the big text in blob storage. Gold = a new paste being saved.</figcaption>
+            <button class="replay" type="button" aria-label="Replay diagram animation">Replay</button>
+          </figure>
+
+          <aside class="callout why reveal">
+            <span class="callout-label">Why</span>
+            <p><strong>Why a random id and not a counter?</strong> A counter (1, 2, 3...) lets anyone read every paste by counting up. Random ids keep pastes unlisted, at the price of a rare retry.</p>
+          </aside>
+        </section>
+
+        <section class="sec" id="2026-10-29-pastebin-sec-deepdives">
+          <h3>Deep dives</h3>
+          <div class="dive reveal">
+            <h4>Where do we keep the text so it is not lost?</h4>
+            <p>Ten GB a day must be cheap to store and safe.</p>
+            <ol class="options">
+              <li><strong>In the database row.</strong> One place to look, but the database swells and backups slow down.</li>
+              <li><strong>On the app server's disk.</strong> Cheap, but other servers cannot see it and a dead disk loses pastes.</li>
+              <li class="pick"><strong>Blob storage.</strong><span class="pick-tag">Pick</span> A <dfn class="term" title="A cheap file store for large data, such as Amazon S3. It keeps copies in several places.">blob store</dfn> keeps copies for us and is built for big files. The database keeps only the small row with the key.</li>
+            </ol>
+            <p>Pastes never change, which suits write-once files. With a 1 MB cap the write service can pass the text on itself; pre-signed upload URLs only pay off for much larger files.</p>
+          </div>
+
+          <div class="dive reveal">
+            <h4>How do we keep reads fast?</h4>
+            <p>Reads outnumber writes ten to one, and one popular paste may be opened thousands of times.</p>
+            <ol class="options">
+              <li><strong>Always ask the database and blob store.</strong> Simple, but every read costs two calls.</li>
+              <li class="pick"><strong>Add a cache.</strong><span class="pick-tag">Pick</span> The read service checks a <dfn class="term" title="A small, very fast memory store holding recent answers.">cache</dfn> first (paste id to text and expiry). On a miss it loads from the <dfn class="term" title="A kept-up-to-date copy of a database that serves reads.">replica</dfn> and blob store, then fills the cache.</li>
+              <li><strong>Add a CDN.</strong> Great worldwide, but more setup than a first design needs.</li>
+            </ol>
+            <p>An entry gets a <dfn class="term" title="Time to live: how long an entry may stay before it is deleted.">TTL</dfn> of one hour, or the time left until the paste expires if that is sooner, so an expired paste is never served.</p>
+          </div>
+
+          <div class="reveal">
+            <h4>Final design</h4>
+            <p>The dives added blob storage and a cache. The <dfn class="term" title="The single front door that sends each request to the right service.">API gateway</dfn> splits traffic by job: new pastes are about 12 a second, reads about ten times that, so the read side can be scaled on its own.</p>
+            <p>If the primary database dies, its replica takes over; the blob store keeps its own copies. If the cache goes down, reads fall back to the database and blob store: slower, but correct.</p>
+          </div>
+
+          <figure class="diagram-fig" id="2026-10-29-pastebin-final">
+            <div class="diagram-scroll" tabindex="0" role="group" aria-label="Diagram: the final pastebin design. Scrollable on small screens.">
+              <svg class="diagram" viewBox="0 0 760 580" role="img" aria-labelledby="2026-10-29-pastebin-d2-t 2026-10-29-pastebin-d2-d">
+                <title id="2026-10-29-pastebin-d2-t">Final pastebin design</title>
+                <desc id="2026-10-29-pastebin-d2-d">A client talks to an API gateway. POST /pastes goes to the write service, which saves the text in blob storage and a row in the metadata database. GET /pastes/id goes to the read service, which checks the cache first, then reads the row from the database replica and the text from blob storage. Signs show what each store holds.</desc>
+                <g class="d-node grass" style="--i:0"><rect x="2" y="197" width="62" height="60"/><text class="d-text" x="33" y="232" text-anchor="middle">Client</text></g>
+                <path class="d-edge" style="--i:1" d="M64 227H84"/><path class="d-arrow" style="--i:1" d="M78 221L86 227L78 233Z"/><path class="d-arrow" style="--i:1" d="M70 221L62 227L70 233Z"/>
+                <g class="d-node" style="--i:1"><rect x="84" y="20" width="120" height="414"/><text class="d-text" x="144" y="202" text-anchor="middle">API</text><text class="d-text" x="144" y="220" text-anchor="middle">gateway</text><text class="d-item" x="94" y="248">- one front door</text><text class="d-item" x="94" y="268">- route by path</text></g>
+                <path class="d-edge accent" style="--i:2" d="M204 70H344"/><path class="d-arrow accent" style="--i:2" d="M338 64L346 70L338 76Z"/>
+                <text class="d-label" style="--i:2" x="274" y="60" text-anchor="middle">POST /pastes</text>
+                <path class="d-edge accent" style="--i:2" d="M204 380H344"/><path class="d-arrow accent" style="--i:2" d="M338 374L346 380L338 386Z"/>
+                <text class="d-label" style="--i:2" x="274" y="370" text-anchor="middle">GET /pastes/{id}</text>
+                <g class="d-node cmd" style="--i:3"><rect x="344" y="20" width="180" height="104"/><text class="d-text" x="434" y="46" text-anchor="middle">Write service</text><text class="d-item" x="358" y="72">- make a random id</text><text class="d-item" x="358" y="92">- save text to blob</text><text class="d-item" x="358" y="112">- save row, return URL</text></g>
+                <path class="d-edge accent" style="--i:4" d="M524 50H696"/><path class="d-arrow accent" style="--i:4" d="M690 44L698 50L690 56Z"/>
+                <text class="d-label" style="--i:4" x="610" y="40" text-anchor="middle">save text</text>
+                <path class="d-edge accent" style="--i:4" d="M424 124V196"/><path class="d-arrow accent" style="--i:4" d="M418 190L424 198L430 190Z"/>
+                <text class="d-label" style="--i:4" x="436" y="164">save row</text>
+                <g class="d-node chest" style="--i:5"><rect x="344" y="196" width="180" height="70"/><text class="d-text" x="434" y="224" text-anchor="middle">Metadata DB</text><text class="d-sub" x="434" y="244" text-anchor="middle">primary + replica</text></g>
+                <path class="d-line" style="--i:5" d="M524 231H544"/>
+                <g class="d-note" style="--i:5"><rect x="544" y="177" width="140" height="108"/><text class="d-note-t" x="556" y="197">pastes table</text><text class="d-mono" x="556" y="217">id  PK</text><text class="d-mono" x="556" y="235">blob_key</text><text class="d-mono" x="556" y="253">created_at</text><text class="d-mono" x="556" y="271">expires_at</text></g>
+                <g class="d-node chest" style="--i:6"><rect x="696" y="20" width="60" height="414"/><text class="d-text" x="726" y="214" text-anchor="middle">Blob</text><text class="d-text" x="726" y="232" text-anchor="middle">store</text></g>
+                <path class="d-line" style="--i:6" d="M684 125H696"/>
+                <g class="d-note" style="--i:6"><rect x="544" y="80" width="140" height="90"/><text class="d-note-t" x="556" y="100">text file</text><text class="d-mono" x="556" y="120">key  blob_key</text><text class="d-mono" x="556" y="138">value  the text</text><text class="d-mono" x="556" y="156">max 1 MB</text></g>
+                <g class="d-node cmd" style="--i:7"><rect x="344" y="330" width="180" height="104"/><text class="d-text" x="434" y="356" text-anchor="middle">Read service</text><text class="d-item" x="358" y="382">- check the cache first</text><text class="d-item" x="358" y="402">- miss: row + text</text><text class="d-item" x="358" y="422">- 404 / 410 if none</text></g>
+                <path class="d-edge" style="--i:8" d="M424 330V266"/><path class="d-arrow" style="--i:8" d="M418 272L424 264L430 272Z"/><path class="d-arrow" style="--i:8" d="M418 324L424 332L430 324Z"/>
+                <text class="d-label" style="--i:8" x="436" y="304">get row</text>
+                <path class="d-edge" style="--i:8" d="M524 404H696"/><path class="d-arrow" style="--i:8" d="M690 398L698 404L690 410Z"/><path class="d-arrow" style="--i:8" d="M530 398L522 404L530 410Z"/>
+                <text class="d-label" style="--i:8" x="610" y="394" text-anchor="middle">get text</text>
+                <path class="d-edge accent" style="--i:9" d="M424 434V484"/><path class="d-arrow accent" style="--i:9" d="M418 478L424 486L430 478Z"/><path class="d-arrow accent" style="--i:9" d="M418 440L424 432L430 440Z"/>
+                <text class="d-label" style="--i:9" x="436" y="464">check first</text>
+                <g class="d-node gem" style="--i:9"><rect x="344" y="484" width="180" height="60"/><text class="d-text" x="434" y="510" text-anchor="middle">Cache</text><text class="d-sub" x="434" y="530" text-anchor="middle">recent pastes</text></g>
+                <path class="d-line" style="--i:9" d="M524 514H544"/>
+                <g class="d-note" style="--i:9"><rect x="544" y="469" width="190" height="90"/><text class="d-note-t" x="556" y="489">cache entry</text><text class="d-mono" x="556" y="509">key  paste id</text><text class="d-mono" x="556" y="527">value  text + expiry</text><text class="d-mono" x="556" y="545">TTL  1 hour at most</text></g>
+                <rect class="d-packet" x="-6" y="-6" width="12" height="12" opacity="0"><animateMotion dur="8s" begin="1.6s" repeatCount="indefinite" keyPoints="0;1;1" keyTimes="0;.4;1" calcMode="linear" path="M64 227H144V70H344H434V50H696"/><animate attributeName="opacity" dur="8s" begin="1.6s" repeatCount="indefinite" values="0;1;1;0;0" keyTimes="0;.02;.38;.4;1"/></rect>
+                <rect class="d-packet alt" x="-6" y="-6" width="12" height="12" opacity="0"><animateMotion dur="8s" begin="1.6s" repeatCount="indefinite" keyPoints="0;0;1;1" keyTimes="0;.5;.9;1" calcMode="linear" path="M64 227H144V380H344H424V484"/><animate attributeName="opacity" dur="8s" begin="1.6s" repeatCount="indefinite" values="0;0;1;1;0;0" keyTimes="0;.5;.51;.89;.9;1"/></rect>
+              </svg>
+            </div>
+            <figcaption>The complete system. Gold = a new paste being saved, cyan = a paste being read. The signs show what each store holds.</figcaption>
+            <button class="replay" type="button" aria-label="Replay diagram animation">Replay</button>
+          </figure>
+
+          <div class="next reveal">
+            <h4>What you could add next</h4>
+            <ul class="next-list">
+              <li>A nightly job that deletes expired rows and their text, so storage stops growing.</li>
+              <li>A CDN in front of reads for readers far from the servers.</li>
+              <li>Split the database by id (sharding) once one primary can't keep up.</li>
+            </ul>
+          </div>
+        </section>
+
+        <section class="sec reveal" id="2026-10-29-pastebin-sec-tips">
+          <h3>Interview tips</h3>
+          <dl class="qa">
+            <div><dt>What if two pastes get the same id?</dt><dd>The primary key rejects the second insert, and the write service retries with a new random id.</dd></div>
+            <div><dt>Why not store the text in the database?</dt><dd>Big text bloats the database and its backups. A blob store is cheaper and built for it.</dd></div>
+            <div><dt>What about a 500 MB paste?</dt><dd>Cap pastes at 1 MB and return 413. Bigger files would use a pre-signed URL, so the upload goes straight to blob storage.</dd></div>
+          </dl>
+          <h4>Common mistakes</h4>
+          <ul class="mistakes">
+            <li>Using 1, 2, 3... as ids, so anyone can read every paste by counting.</li>
+            <li>Returning 404 for an expired paste, which hides the difference between "gone" and "never existed".</li>
+          </ul>
+          <aside class="callout tip">
+            <span class="callout-label">Interview tip</span>
+            <p>Say early that you split a small record from a big blob, and why.</p>
+          </aside>
+          <aside class="callout confidence">
+            <span class="callout-label">Confidence note</span>
+            <p>The traffic numbers and 1 MB cap are assumptions. A random id and a key-generator service are both accepted. A replica can rarely miss a brand-new paste; retrying on the primary fixes it.</p>
+          </aside>
+        </section>
+
+        <p class="sources">Sources: Hello Interview, <a href="https://www.hellointerview.com/learn/system-design/problem-breakdowns/pastebin">Pastebin breakdown</a> and <a href="https://www.hellointerview.com/learn/system-design/in-a-hurry/delivery">delivery framework</a>; Alex Xu, <em>System Design Interview</em> (Vol. 1), URL shortener chapter (id generation ideas); MDN, <a href="https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/410">410 Gone</a> and <a href="https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/413">413 Content Too Large</a>; Redis docs, <a href="https://redis.io/docs/latest/commands/expire/">EXPIRE</a>.</p>
+      </div>
+    </article>
     <article class="entry" id="2026-10-28-rate-limiter" data-topic="Rate limiter" data-domain="Counters &amp; limits" data-date="2026-10-28" data-level="1">
       <header class="entry-head">
         <div class="entry-meta">
