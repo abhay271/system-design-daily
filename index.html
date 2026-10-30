@@ -420,6 +420,7 @@ dfn.term{font-style:normal;border-bottom:2px dotted var(--accent);cursor:help}
       <h2><svg viewBox="0 0 12 12" aria-hidden="true"><path fill="#7A4A2A" d="M0 2h12v9H0z"/><path fill="#A86A3C" d="M1 3h10v3H1zM1 7h10v3H1z"/><path fill="#E9B526" d="M5 5h2v3H5z"/><path fill="#4A2C18" d="M0 6h5v1H0zM7 6h5v1H7z"/></svg>Archive</h2>
       <ol class="toc">
         <!-- TOC -->
+        <li><a href="#2026-10-30-notification-system"><time datetime="2026-10-30">2026-10-30</time><span>Notification system: send it later, send it once</span></a></li>
         <li><a href="#2026-10-29-pastebin"><time datetime="2026-10-29">2026-10-29</time><span>Pastebin: a tiny record plus a big blob</span></a></li>
         <li><a href="#2026-10-28-rate-limiter"><time datetime="2026-10-28">2026-10-28</time><span>Rate limiter: counting fairly across many servers</span></a></li>
         <li><a href="#2026-10-27-url-shortener"><time datetime="2026-10-27">2026-10-27</time><span>URL shortener: one lookup, billions of clicks</span></a></li>
@@ -430,6 +431,290 @@ dfn.term{font-style:normal;border-bottom:2px dotted var(--accent);cursor:help}
 
   <main id="entries" tabindex="-1">
     <!-- ENTRIES -->
+    <article class="entry" id="2026-10-30-notification-system" data-topic="Notification system" data-domain="Queues &amp; async jobs" data-date="2026-10-30" data-level="1">
+      <header class="entry-head">
+        <div class="entry-meta">
+          <span class="chip">Queues &amp; async jobs</span>
+          <span class="level" title="Difficulty: level 1 of 3">Lv 1</span>
+          <time datetime="2026-10-30">30 Oct 2026</time>
+          <span class="read"><span class="read-time">4</span> min read</span>
+        </div>
+        <h2 class="entry-title">Design a notification system</h2>
+        <p class="lede">An online shop wants to tell you that your order shipped, with a push on your phone or an email. The checkout service just says "tell user 42", and the notification system does the rest. It is a good question because the slow part, talking to Apple, Google or an email service, must not hold up the caller.</p>
+        <nav class="steps" aria-label="Sections of this design">
+          <a href="#2026-10-30-notification-system-sec-functional">Features</a>
+          <a href="#2026-10-30-notification-system-sec-nonfunctional">Qualities</a>
+          <a href="#2026-10-30-notification-system-sec-entities">Entities</a>
+          <a href="#2026-10-30-notification-system-sec-api">API</a>
+          <a href="#2026-10-30-notification-system-sec-hld">Design</a>
+          <a href="#2026-10-30-notification-system-sec-deepdives">Deep dives</a>
+          <a href="#2026-10-30-notification-system-sec-tips">Tips</a>
+        </nav>
+      </header>
+
+      <div class="prose">
+        <details class="legend">
+          <summary>Legend <span class="hint">7 terms used below</span></summary>
+          <dl>
+            <div><dt>202 Accepted</dt><dd>The HTTP status code for "we took your request and will finish it shortly". It does not mean the work is done.</dd></div>
+            <div><dt>API gateway</dt><dd>The single front door of a system. It receives every request and sends each one to the right service.</dd></div>
+            <div><dt>Provider</dt><dd>An outside company that really delivers the message, such as Apple's or Google's push service, or an email service.</dd></div>
+            <div><dt>Queue</dt><dd>A line of jobs kept safely until someone is free to do them. Jobs go in at one end and come out at the other.</dd></div>
+            <div><dt>Worker</dt><dd>A program that takes jobs off a queue and does them, one after another. You can run more workers when the line grows.</dd></div>
+            <div><dt>Replica</dt><dd>A copy of a database that is kept up to date. It takes over if the main copy (the primary) dies.</dd></div>
+            <div><dt>Dead-letter queue</dt><dd>A side queue for jobs that kept failing. They wait there for a person to look at them instead of retrying forever.</dd></div>
+          </dl>
+        </details>
+
+        <section class="sec reveal" id="2026-10-30-notification-system-sec-functional">
+          <h3>Functional requirements</h3>
+          <ul class="reqs">
+            <li>Another service asks us to notify a user by push or email.</li>
+            <li>A user can switch push or email on or off.</li>
+          </ul>
+          <p class="out">Out of scope: SMS, marketing campaigns, templates, an in-app inbox, delivery-status API.</p>
+        </section>
+
+        <section class="sec reveal" id="2026-10-30-notification-system-sec-nonfunctional">
+          <h3>Non-functional requirements</h3>
+          <ul class="reqs nfr">
+            <li><strong>Fast to accept.</strong> The caller, say checkout, must not wait for Apple or an email server.</li>
+            <li><strong>Survives spikes.</strong> A sale can send ten times the usual traffic within minutes.</li>
+            <li><strong>Not lost.</strong> "Your payment failed" must still arrive if a server crashes.</li>
+            <li><strong>Rarely duplicated.</strong> Getting the same alert three times is annoying.</li>
+          </ul>
+        </section>
+
+        <section class="sec reveal" id="2026-10-30-notification-system-sec-entities">
+          <h3>Core entities</h3>
+          <ul class="entities">
+            <li><strong>Notification:</strong> an id, the user, the channel (push or email), the text and a status.</li>
+            <li><strong>Preferences:</strong> which channels a user allows, plus their push token and email address.</li>
+          </ul>
+        </section>
+
+        <section class="sec reveal" id="2026-10-30-notification-system-sec-api">
+          <h3>API design</h3>
+          <div class="api-list">
+            <div class="api">
+              <div class="api-sig"><span class="method">POST</span><code>/notifications</code></div>
+              <p>Called by our own services, so the target user is in the body. The caller picks the id. A repeated id sends only once.</p>
+              <div class="io">
+                <div><span class="io-l">Request body</span><pre>{
+  "id": "order-991-shipped",
+  "user_id": "u42",
+  "channel": "push",
+  "title": "Order shipped",
+  "body": "Arrives Friday"
+}</pre></div>
+                <div><span class="io-l">Response 202 Accepted</span><pre>{
+  "id": "order-991-shipped",
+  "status": "queued"
+}</pre></div>
+              </div>
+            </div>
+            <div class="api">
+              <div class="api-sig"><span class="method put">PUT</span><code>/preferences</code></div>
+              <p>Update my own settings. The user comes from the auth token, not the body.</p>
+              <div class="io">
+                <div><span class="io-l">Request body</span><pre>{
+  "push_on": true,
+  "email_on": false
+}</pre></div>
+                <div><span class="io-l">Response 200 OK</span><pre>{
+  "push_on": true,
+  "email_on": false
+}</pre></div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="sec" id="2026-10-30-notification-system-sec-hld">
+          <h3>High-level design</h3>
+          <div class="reveal">
+            <p>Assume the usual setup: identical app servers that keep no data, behind a load balancer. Assume 10 million notifications a day. That is about 115 a second (10 million / 86,400), and a sale might push it to 1,200. One database handles that, so no sharding yet.</p>
+            <h4>1. Sending a notification</h4>
+            <p>The server reads the user's preferences. If the channel is off, it saves the row as <code>skipped</code> and stops. Otherwise it saves the row as <code>queued</code>, puts a job on a <dfn class="term" title="A line of jobs kept safely until someone is free to do them.">queue</dfn>, and replies <dfn class="term" title="Status code for: we took your request and will finish it shortly.">202 Accepted</dfn>. <dfn class="term" title="A program that takes jobs off a queue and does them.">Workers</dfn> do the slow part: they hand the message to a <dfn class="term" title="An outside company that really delivers the message, such as Apple's or Google's push service, or an email service.">provider</dfn> and mark the row <code>sent</code>.</p>
+            <div class="table-scroll">
+              <table class="schema">
+                <caption>Table: notifications</caption>
+                <thead><tr><th>Column</th><th>Type</th><th>Note</th></tr></thead>
+                <tbody>
+                  <tr><td>id</td><td>text</td><td>primary key, chosen by the caller</td></tr>
+                  <tr><td>user_id</td><td>text</td><td>who gets it</td></tr>
+                  <tr><td>channel</td><td>text</td><td>push or email</td></tr>
+                  <tr><td>status</td><td>text</td><td>queued, sent, failed or skipped</td></tr>
+                  <tr><td>created_at</td><td>timestamp</td><td>when we accepted it</td></tr>
+                </tbody>
+              </table>
+            </div>
+            <h4>2. Switching channels on or off</h4>
+            <p>The update changes one row, found by user id.</p>
+            <div class="table-scroll">
+              <table class="schema">
+                <caption>Table: preferences</caption>
+                <thead><tr><th>Column</th><th>Type</th><th>Note</th></tr></thead>
+                <tbody>
+                  <tr><td>user_id</td><td>text</td><td>primary key, so a lookup is one read</td></tr>
+                  <tr><td>push_on, email_on</td><td>boolean</td><td>the two switches</td></tr>
+                  <tr><td>push_token, email</td><td>text</td><td>where to deliver</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <figure class="diagram-fig">
+            <div class="diagram-scroll" tabindex="0" role="group" aria-label="Diagram: notification system architecture. Scrollable on small screens.">
+              <svg class="diagram" viewBox="0 0 760 480" role="img" aria-labelledby="2026-10-30-notification-system-d1-t 2026-10-30-notification-system-d1-d">
+                <title id="2026-10-30-notification-system-d1-t">Notification system architecture</title>
+                <desc id="2026-10-30-notification-system-d1-d">A client calls a notify app. The app reads preferences and saves a row in a database, then puts a job on a send queue. Workers take jobs from the queue and hand them to push and email providers. Signs beside the database and the queue show what they hold.</desc>
+                <g class="d-node grass" style="--i:0"><rect x="2" y="150" width="62" height="60"/><text class="d-text" x="33" y="185" text-anchor="middle">Client</text></g>
+                <path class="d-edge accent" style="--i:1" d="M64 180H144"/><path class="d-arrow accent" style="--i:1" d="M138 174L146 180L138 186Z"/><path class="d-arrow accent" style="--i:1" d="M70 174L62 180L70 186Z"/>
+                <text class="d-label" style="--i:1" x="104" y="170" text-anchor="middle">request</text>
+                <g class="d-node cmd" style="--i:2"><rect x="144" y="120" width="170" height="104"/><text class="d-text" x="229" y="146" text-anchor="middle">Notify app</text><text class="d-item" x="158" y="172">- check preferences</text><text class="d-item" x="158" y="192">- save row, queue job</text><text class="d-item" x="158" y="212">- reply 202 Accepted</text></g>
+                <path class="d-edge accent" style="--i:3" d="M314 150H400V50H520"/><path class="d-arrow accent" style="--i:3" d="M514 44L522 50L514 56Z"/><path class="d-arrow accent" style="--i:3" d="M320 144L312 150L320 156Z"/>
+                <text class="d-label" style="--i:3" x="410" y="40">prefs, row</text>
+                <g class="d-node chest" style="--i:4"><rect x="520" y="20" width="230" height="60"/><text class="d-text" x="635" y="46" text-anchor="middle">Database</text><text class="d-sub" x="635" y="66" text-anchor="middle">primary + replica</text></g>
+                <path class="d-line" style="--i:4" d="M635 80V96"/>
+                <g class="d-note" style="--i:4"><rect x="520" y="96" width="190" height="168"/><text class="d-note-t" x="532" y="116">notifications</text><text class="d-mono" x="532" y="136">id  PK</text><text class="d-mono" x="532" y="154">user_id, channel</text><text class="d-mono" x="532" y="172">status, created_at</text><text class="d-note-t" x="532" y="196">preferences</text><text class="d-mono" x="532" y="216">user_id  PK</text><text class="d-mono" x="532" y="234">push_on, email_on</text><text class="d-mono" x="532" y="252">push_token, email</text></g>
+                <path class="d-edge accent" style="--i:5" d="M229 224V300"/><path class="d-arrow accent" style="--i:5" d="M223 294L229 302L235 294Z"/>
+                <text class="d-label" style="--i:5" x="241" y="268">queue job</text>
+                <g class="d-node furnace" style="--i:6"><rect x="154" y="300" width="150" height="60"/><text class="d-text" x="229" y="326" text-anchor="middle">Send queue</text><text class="d-sub" x="229" y="346" text-anchor="middle">jobs wait here</text></g>
+                <path class="d-line" style="--i:6" d="M229 360V376"/>
+                <g class="d-note" style="--i:6"><rect x="134" y="376" width="190" height="90"/><text class="d-note-t" x="146" y="396">queue message</text><text class="d-mono" x="146" y="416">id  (dedupe key)</text><text class="d-mono" x="146" y="434">user_id, channel</text><text class="d-mono" x="146" y="452">title, body</text></g>
+                <path class="d-edge accent" style="--i:7" d="M304 330H370"/><path class="d-arrow accent" style="--i:7" d="M364 324L372 330L364 336Z"/>
+                <text class="d-label" style="--i:7" x="337" y="320" text-anchor="middle">job</text>
+                <g class="d-node furnace" style="--i:8"><rect x="370" y="286" width="170" height="104"/><text class="d-text" x="455" y="312" text-anchor="middle">Workers</text><text class="d-item" x="384" y="338">- skip if already sent</text><text class="d-item" x="384" y="358">- call the provider</text><text class="d-item" x="384" y="378">- retry on failure</text></g>
+                <path class="d-edge accent" style="--i:9" d="M540 330H590"/><path class="d-arrow accent" style="--i:9" d="M584 324L592 330L584 336Z"/>
+                <text class="d-label" style="--i:9" x="565" y="320" text-anchor="middle">send</text>
+                <g class="d-node" style="--i:10"><rect x="590" y="290" width="160" height="84"/><text class="d-text" x="670" y="316" text-anchor="middle">Providers</text><text class="d-item" x="602" y="342">- push: APNs, FCM</text><text class="d-item" x="602" y="362">- email service</text></g>
+                <rect class="d-packet" x="-6" y="-6" width="12" height="12" opacity="0"><animateMotion dur="6s" begin="1.2s" repeatCount="indefinite" keyPoints="0;1;1" keyTimes="0;.6;1" calcMode="linear" path="M64 180H229V330H590"/><animate attributeName="opacity" dur="6s" begin="1.2s" repeatCount="indefinite" values="0;1;1;0;0" keyTimes="0;.02;.58;.6;1"/></rect>
+              </svg>
+            </div>
+            <figcaption>One app tier saves a row and drops a job on a queue; workers do the slow delivery. Gold = one notification on its way.</figcaption>
+            <button class="replay" type="button" aria-label="Replay diagram animation">Replay</button>
+          </figure>
+
+          <aside class="callout why reveal">
+            <span class="callout-label">Why</span>
+            <p><strong>Why does the caller choose the id?</strong> If we made the id ourselves, a retry of the same request would look like a new one. With the caller's id, the primary key rejects the second copy.</p>
+          </aside>
+        </section>
+
+        <section class="sec" id="2026-10-30-notification-system-sec-deepdives">
+          <h3>Deep dives</h3>
+          <div class="dive reveal">
+            <h4>How do we answer fast and survive spikes?</h4>
+            <p>A provider can take seconds or fail, and a sale sends ten times the usual traffic.</p>
+            <ol class="options">
+              <li><strong>Send inside the request.</strong> Simplest, but the caller waits on the provider.</li>
+              <li><strong>Send from a background thread in the app.</strong> The caller is quick, but waiting work vanishes if that server crashes.</li>
+              <li class="pick"><strong>Queue plus workers.</strong><span class="pick-tag">Pick</span> The queue keeps jobs safe until a worker is free.</li>
+            </ol>
+            <p>We reply 202 as soon as the row is saved and the job is queued. A spike only lengthens the line; we add workers to drain it.</p>
+          </div>
+
+          <div class="dive reveal">
+            <h4>How do we avoid losing or double-sending?</h4>
+            <p>Workers crash and providers time out. The primary key already blocks repeated requests; the risk is inside the workers.</p>
+            <ol class="options">
+              <li><strong>Try once.</strong> Simple, but one hiccup loses it.</li>
+              <li><strong>Retry forever.</strong> Nothing is lost, but one bad job blocks the line and a crash after sending causes a repeat.</li>
+              <li class="pick"><strong>Retry a few times, then park it.</strong><span class="pick-tag">Pick</span> Safe retries, with a place for hopeless jobs.</li>
+            </ol>
+            <p>The queue hides a job until the worker confirms it is done, so a dead worker's job comes back. Before sending, the worker checks the row and skips anything already <code>sent</code>. After 3 failed tries with growing waits, the job goes to a <dfn class="term" title="A side queue for jobs that kept failing, kept for a person to inspect.">dead-letter queue</dfn>. This is "at least once": if a worker crashes between sending and saving <code>sent</code>, a user may get two.</p>
+          </div>
+
+          <div class="reveal">
+            <h4>Final design</h4>
+            <p>The dives added a queue, workers and a dead-letter queue. The <dfn class="term" title="The single front door that sends each request to the right service.">API gateway</dfn> splits traffic by job: sending carries nearly all the load and can spike, while preference changes are a person tapping a switch, so each side can be scaled on its own.</p>
+            <p>No cache: a preference lookup is one read by primary key at about 115 a second, which the database handles. If the primary database dies, its <dfn class="term" title="A kept-up-to-date copy of a database that takes over if the main one dies.">replica</dfn> takes over. If the queue is down, the send service returns 503 and callers retry with the same id. If a provider is down, jobs wait and retry.</p>
+          </div>
+
+          <figure class="diagram-fig" id="2026-10-30-notification-system-final">
+            <div class="diagram-scroll" tabindex="0" role="group" aria-label="Diagram: the final notification system design. Scrollable on small screens.">
+              <svg class="diagram" viewBox="0 0 760 700" role="img" aria-labelledby="2026-10-30-notification-system-d2-t 2026-10-30-notification-system-d2-d">
+                <title id="2026-10-30-notification-system-d2-t">Final notification system design</title>
+                <desc id="2026-10-30-notification-system-d2-d">A client talks to an API gateway. PUT /preferences goes to the pref service, which saves the user's switches in the database. POST /notifications goes to the send service, which checks preferences, saves a row in the database and puts a job on the send queue. Workers pull jobs from the queue, call the push and email providers, and update the row status in the database. Jobs that fail three times go to a dead-letter queue. Signs show what each store holds.</desc>
+                <g class="d-node grass" style="--i:0"><rect x="2" y="107" width="62" height="60"/><text class="d-text" x="33" y="142" text-anchor="middle">Client</text></g>
+                <path class="d-edge" style="--i:1" d="M64 137H84"/><path class="d-arrow" style="--i:1" d="M78 131L86 137L78 143Z"/><path class="d-arrow" style="--i:1" d="M70 131L62 137L70 143Z"/>
+                <g class="d-node" style="--i:1"><rect x="84" y="20" width="120" height="234"/><text class="d-text" x="144" y="112" text-anchor="middle">API</text><text class="d-text" x="144" y="130" text-anchor="middle">gateway</text><text class="d-item" x="94" y="158">- one front door</text><text class="d-item" x="94" y="178">- route by path</text></g>
+                <path class="d-edge" style="--i:2" d="M204 62H326"/><path class="d-arrow" style="--i:2" d="M320 56L328 62L320 68Z"/>
+                <text class="d-label" style="--i:2" x="265" y="40" text-anchor="middle">PUT</text>
+                <text class="d-label" style="--i:2" x="265" y="54" text-anchor="middle">/preferences</text>
+                <path class="d-edge accent" style="--i:2" d="M204 202H326"/><path class="d-arrow accent" style="--i:2" d="M320 196L328 202L320 208Z"/>
+                <text class="d-label" style="--i:2" x="265" y="180" text-anchor="middle">POST</text>
+                <text class="d-label" style="--i:2" x="265" y="194" text-anchor="middle">/notifications</text>
+                <g class="d-node cmd" style="--i:3"><rect x="326" y="20" width="170" height="84"/><text class="d-text" x="411" y="46" text-anchor="middle">Pref service</text><text class="d-item" x="340" y="72">- save on/off switches</text><text class="d-item" x="340" y="92">- return new settings</text></g>
+                <g class="d-node cmd" style="--i:3"><rect x="326" y="150" width="170" height="104"/><text class="d-text" x="411" y="176" text-anchor="middle">Send service</text><text class="d-item" x="340" y="202">- check preferences</text><text class="d-item" x="340" y="222">- save row, queue job</text><text class="d-item" x="340" y="242">- reply 202 Accepted</text></g>
+                <path class="d-edge" style="--i:4" d="M496 62H554V310H616"/><path class="d-arrow" style="--i:4" d="M610 304L618 310L610 316Z"/><path class="d-arrow" style="--i:4" d="M502 56L494 62L502 68Z"/>
+                <text class="d-label" style="--i:4" x="508" y="52">prefs</text>
+                <path class="d-edge accent" style="--i:4" d="M496 202H520V370H616"/><path class="d-arrow accent" style="--i:4" d="M610 364L618 370L610 376Z"/><path class="d-arrow accent" style="--i:4" d="M502 196L494 202L502 208Z"/>
+                <text class="d-label" style="--i:4" x="568" y="360" text-anchor="middle">prefs, row</text>
+                <g class="d-node chest" style="--i:5"><rect x="616" y="290" width="142" height="100"/><text class="d-text" x="687" y="330" text-anchor="middle">Database</text><text class="d-sub" x="687" y="352" text-anchor="middle">primary + replica</text></g>
+                <path class="d-line" style="--i:5" d="M687 278V290"/>
+                <g class="d-note" style="--i:5"><rect x="568" y="96" width="190" height="182"/><text class="d-note-t" x="580" y="116">notifications</text><text class="d-mono" x="580" y="136">id  PK (from caller)</text><text class="d-mono" x="580" y="154">user_id, channel</text><text class="d-mono" x="580" y="172">status, created_at</text><text class="d-note-t" x="580" y="196">preferences</text><text class="d-mono" x="580" y="216">user_id  PK</text><text class="d-mono" x="580" y="234">push_on, email_on</text><text class="d-mono" x="580" y="252">push_token, email</text></g>
+                <path class="d-edge accent" style="--i:6" d="M411 254V310"/><path class="d-arrow accent" style="--i:6" d="M405 304L411 312L417 304Z"/>
+                <text class="d-label" style="--i:6" x="423" y="288">queue job</text>
+                <g class="d-node furnace" style="--i:7"><rect x="326" y="310" width="170" height="60"/><text class="d-text" x="411" y="336" text-anchor="middle">Send queue</text><text class="d-sub" x="411" y="356" text-anchor="middle">jobs wait here</text></g>
+                <path class="d-line" style="--i:7" d="M296 340H326"/>
+                <g class="d-note" style="--i:7"><rect x="106" y="296" width="190" height="90"/><text class="d-note-t" x="118" y="316">queue message</text><text class="d-mono" x="118" y="336">id  (dedupe key)</text><text class="d-mono" x="118" y="354">user_id, channel</text><text class="d-mono" x="118" y="372">title, body</text></g>
+                <path class="d-edge accent" style="--i:8" d="M411 370V430"/><path class="d-arrow accent" style="--i:8" d="M405 424L411 432L417 424Z"/><path class="d-arrow accent" style="--i:8" d="M405 376L411 368L417 376Z"/>
+                <text class="d-label" style="--i:8" x="423" y="404">pull + ack</text>
+                <g class="d-node furnace" style="--i:9"><rect x="326" y="430" width="170" height="104"/><text class="d-text" x="411" y="456" text-anchor="middle">Workers</text><text class="d-item" x="340" y="482">- skip if already sent</text><text class="d-item" x="340" y="502">- call the provider</text><text class="d-item" x="340" y="522">- retry, then give up</text></g>
+                <path class="d-edge" style="--i:10" d="M496 482H687V390"/><path class="d-arrow" style="--i:10" d="M681 396L687 388L693 396Z"/><path class="d-arrow" style="--i:10" d="M502 476L494 482L502 488Z"/>
+                <text class="d-label" style="--i:10" x="590" y="472" text-anchor="middle">status</text>
+                <path class="d-edge" style="--i:11" d="M326 470H246"/><path class="d-arrow" style="--i:11" d="M252 464L244 470L252 476Z"/>
+                <text class="d-label" style="--i:11" x="286" y="460" text-anchor="middle">3 fails</text>
+                <g class="d-node furnace" style="--i:12"><rect x="106" y="440" width="140" height="60"/><text class="d-text" x="176" y="466" text-anchor="middle">Dead letters</text><text class="d-sub" x="176" y="486" text-anchor="middle">failed jobs</text></g>
+                <path class="d-line" style="--i:12" d="M176 500V516"/>
+                <g class="d-note" style="--i:12"><rect x="56" y="516" width="190" height="72"/><text class="d-note-t" x="68" y="536">failed jobs</text><text class="d-mono" x="68" y="556">id, user_id, channel</text><text class="d-mono" x="68" y="574">last error</text></g>
+                <path class="d-edge accent" style="--i:13" d="M411 534V590"/><path class="d-arrow accent" style="--i:13" d="M405 584L411 592L417 584Z"/>
+                <text class="d-label" style="--i:13" x="423" y="566">send</text>
+                <g class="d-node" style="--i:14"><rect x="326" y="590" width="170" height="84"/><text class="d-text" x="411" y="616" text-anchor="middle">Providers</text><text class="d-item" x="340" y="642">- push: APNs, FCM</text><text class="d-item" x="340" y="662">- email service</text></g>
+                <rect class="d-packet" x="-6" y="-6" width="12" height="12" opacity="0"><animateMotion dur="8s" begin="1.6s" repeatCount="indefinite" keyPoints="0;1;1" keyTimes="0;.5;1" calcMode="linear" path="M64 137H144V202H411V590"/><animate attributeName="opacity" dur="8s" begin="1.6s" repeatCount="indefinite" values="0;1;1;0;0" keyTimes="0;.02;.48;.5;1"/></rect>
+                <rect class="d-packet alt" x="-6" y="-6" width="12" height="12" opacity="0"><animateMotion dur="8s" begin="1.6s" repeatCount="indefinite" keyPoints="0;0;1;1" keyTimes="0;.5;.92;1" calcMode="linear" path="M64 137H144V62H554V310H616"/><animate attributeName="opacity" dur="8s" begin="1.6s" repeatCount="indefinite" values="0;0;1;1;0;0" keyTimes="0;.5;.51;.91;.92;1"/></rect>
+              </svg>
+            </div>
+            <figcaption>The complete system. Gold = a notification being sent, cyan = a user changing preferences. The signs show what each store holds.</figcaption>
+            <button class="replay" type="button" aria-label="Replay diagram animation">Replay</button>
+          </figure>
+
+          <div class="next reveal">
+            <h4>What you could add next</h4>
+            <ul class="next-list">
+              <li>A separate queue per channel, so a slow email service never delays push.</li>
+              <li>A priority lane, so "payment failed" jumps ahead of promotions.</li>
+              <li>A per-user limit on how many notifications they get per hour.</li>
+            </ul>
+          </div>
+        </section>
+
+        <section class="sec reveal" id="2026-10-30-notification-system-sec-tips">
+          <h3>Interview tips</h3>
+          <dl class="qa">
+            <div><dt>What if a user has several phones?</dt><dd>Keep one push token per device in a devices table, and send one job per device.</dd></div>
+            <div><dt>How do you stop spamming users?</dt><dd>Limit notifications per user per hour, and let users mute categories.</dd></div>
+          </dl>
+          <h4>Common mistakes</h4>
+          <ul class="mistakes">
+            <li>Calling the provider inside the API request, so the caller waits and a slow provider hurts everyone.</li>
+            <li>Forgetting the opt-out check, or retrying with no limit.</li>
+          </ul>
+          <aside class="callout tip">
+            <span class="callout-label">Interview tip</span>
+            <p>Say "202 means accepted, not delivered". It shows you know the work finishes later.</p>
+          </aside>
+          <aside class="callout confidence">
+            <span class="callout-label">Confidence note</span>
+            <p>The traffic numbers, the 3 tries and the 503 behaviour are assumptions. Exactly-once delivery is not realistic across a network, so "at least once plus a check" is the common answer; some designs pick "at most once" for low-value messages.</p>
+          </aside>
+        </section>
+
+        <p class="sources">Sources: Hello Interview, <a href="https://www.hellointerview.com/learn/system-design/problem-breakdowns/notification-system">Notification system breakdown</a> and <a href="https://www.hellointerview.com/learn/system-design/in-a-hurry/delivery">delivery framework</a>; Alex Xu, <em>System Design Interview</em> (Vol. 1), "Design a notification system" chapter; MDN, <a href="https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/202">202 Accepted</a>.</p>
+      </div>
+    </article>
     <article class="entry" id="2026-10-29-pastebin" data-topic="Pastebin" data-domain="Media &amp; files" data-date="2026-10-29" data-level="1">
       <header class="entry-head">
         <div class="entry-meta">
