@@ -420,6 +420,7 @@ dfn.term{font-style:normal;border-bottom:2px dotted var(--accent);cursor:help}
       <h2><svg viewBox="0 0 12 12" aria-hidden="true"><path fill="#7A4A2A" d="M0 2h12v9H0z"/><path fill="#A86A3C" d="M1 3h10v3H1zM1 7h10v3H1z"/><path fill="#E9B526" d="M5 5h2v3H5z"/><path fill="#4A2C18" d="M0 6h5v1H0zM7 6h5v1H7z"/></svg>Archive</h2>
       <ol class="toc">
         <!-- TOC -->
+        <li><a href="#2026-10-31-leaderboard"><time datetime="2026-10-31">2026-10-31</time><span>Leaderboard: ranking millions without sorting them</span></a></li>
         <li><a href="#2026-10-30-notification-system"><time datetime="2026-10-30">2026-10-30</time><span>Notification system: send it later, send it once</span></a></li>
         <li><a href="#2026-10-29-pastebin"><time datetime="2026-10-29">2026-10-29</time><span>Pastebin: a tiny record plus a big blob</span></a></li>
         <li><a href="#2026-10-28-rate-limiter"><time datetime="2026-10-28">2026-10-28</time><span>Rate limiter: counting fairly across many servers</span></a></li>
@@ -431,6 +432,273 @@ dfn.term{font-style:normal;border-bottom:2px dotted var(--accent);cursor:help}
 
   <main id="entries" tabindex="-1">
     <!-- ENTRIES -->
+    <article class="entry" id="2026-10-31-leaderboard" data-topic="Leaderboard" data-domain="Counters &amp; limits" data-date="2026-10-31" data-level="1">
+      <header class="entry-head">
+        <div class="entry-meta">
+          <span class="chip">Counters &amp; limits</span>
+          <span class="level" title="Difficulty: level 1 of 3">Lv 1</span>
+          <time datetime="2026-10-31">31 Oct 2026</time>
+          <span class="read"><span class="read-time">4</span> min read</span>
+        </div>
+        <h2 class="entry-title">Design a game leaderboard</h2>
+        <p class="lede">A mobile game shows the top 10 players this month and tells you "you are #48,213". It is a good question because ranking millions of players with an ordinary query is slow, and one data structure fixes it.</p>
+        <nav class="steps" aria-label="Sections of this design">
+          <a href="#2026-10-31-leaderboard-sec-functional">Features</a>
+          <a href="#2026-10-31-leaderboard-sec-nonfunctional">Qualities</a>
+          <a href="#2026-10-31-leaderboard-sec-entities">Entities</a>
+          <a href="#2026-10-31-leaderboard-sec-api">API</a>
+          <a href="#2026-10-31-leaderboard-sec-hld">Design</a>
+          <a href="#2026-10-31-leaderboard-sec-deepdives">Deep dives</a>
+          <a href="#2026-10-31-leaderboard-sec-tips">Tips</a>
+        </nav>
+      </header>
+
+      <div class="prose">
+        <details class="legend">
+          <summary>Legend <span class="hint">5 terms used below</span></summary>
+          <dl>
+            <div><dt>Index</dt><dd>A sorted lookup list the database keeps beside a table, like the index at the back of a book. It makes finding rows by one column fast.</dd></div>
+            <div><dt>Redis</dt><dd>A very fast database that keeps its data in memory. It is often used for things that must answer in a millisecond.</dd></div>
+            <div><dt>Sorted set</dt><dd>A Redis data type: a list of names, each with a number, kept in order by that number at all times.</dd></div>
+            <div><dt>API gateway</dt><dd>The single front door of a system. It receives every request and sends each one to the right service.</dd></div>
+            <div><dt>Replica</dt><dd>A copy of a database that is kept up to date. It takes over if the main copy (the primary) dies.</dd></div>
+          </dl>
+        </details>
+
+        <section class="sec reveal" id="2026-10-31-leaderboard-sec-functional">
+          <h3>Functional requirements</h3>
+          <ul class="reqs">
+            <li>After a match, the game sends the points the player earned.</li>
+            <li>Anyone can see the top 10 players this month.</li>
+            <li>A player can see their own rank, with the players just around them.</li>
+          </ul>
+          <p class="out">Out of scope: friends-only boards, cheat detection, prizes, past seasons.</p>
+        </section>
+
+        <section class="sec reveal" id="2026-10-31-leaderboard-sec-nonfunctional">
+          <h3>Non-functional requirements</h3>
+          <ul class="reqs nfr">
+            <li><strong>Fast ranking.</strong> "What is my rank?" must not scan millions of rows.</li>
+            <li><strong>Fresh.</strong> Your rank should move within about a second of a match ending.</li>
+            <li><strong>Never lose a score.</strong> A crash must not erase points.</li>
+            <li><strong>Counted once.</strong> A retried request must not add the same points twice.</li>
+          </ul>
+        </section>
+
+        <section class="sec reveal" id="2026-10-31-leaderboard-sec-entities">
+          <h3>Core entities</h3>
+          <ul class="entities">
+            <li><strong>Match score:</strong> a match id, the player, the points and the time.</li>
+            <li><strong>Leaderboard:</strong> each player's total for the month, kept in order.</li>
+          </ul>
+        </section>
+
+        <section class="sec reveal" id="2026-10-31-leaderboard-sec-api">
+          <h3>API design</h3>
+          <div class="api-list">
+            <div class="api">
+              <div class="api-sig"><span class="method">POST</span><code>/scores</code></div>
+              <p>The player comes from the auth token. A repeated match id returns 200 OK with the same total and adds nothing.</p>
+              <div class="io">
+                <div><span class="io-l">Request body</span><pre>{
+  "match_id": "m-7731",
+  "points": 120
+}</pre></div>
+                <div><span class="io-l">Response 201 Created</span><pre>{
+  "match_id": "m-7731",
+  "total": 1840
+}</pre></div>
+              </div>
+            </div>
+            <div class="api">
+              <div class="api-sig"><span class="method get">GET</span><code>/leaderboard?limit=10&amp;cursor=</code></div>
+              <p>One page of the board, best first, plus a cursor for the next page.</p>
+              <div class="io">
+                <div><span class="io-l">Request body</span><pre>(none)</pre></div>
+                <div><span class="io-l">Response 200 OK</span><pre>{
+  "entries": [
+    { "rank": 1, "user_id": "u9", "score": 9120 }
+  ],
+  "next_cursor": "10"
+}</pre></div>
+              </div>
+            </div>
+            <div class="api">
+              <div class="api-sig"><span class="method get">GET</span><code>/leaderboard/me?around=2</code></div>
+              <p>My rank and score, plus the 2 players above and below me.</p>
+              <div class="io">
+                <div><span class="io-l">Request body</span><pre>(none)</pre></div>
+                <div><span class="io-l">Response 200 OK</span><pre>{
+  "rank": 48213,
+  "score": 1840,
+  "nearby": [
+    { "rank": 48212, "user_id": "u5", "score": 1845 }
+  ]
+}</pre></div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="sec" id="2026-10-31-leaderboard-sec-hld">
+          <h3>High-level design</h3>
+          <div class="reveal">
+            <p>Assume the usual setup: identical app servers that keep no data, behind a load balancer. Assume 5 million players and 2 million matches a day. That is about 23 writes a second (2 million / 86,400), maybe 10 times that at the evening peak. One database handles that, so no sharding yet. Reads are the heavier side.</p>
+            <h4>1. Sending a score</h4>
+            <p>The server saves one row per match. The primary key is the match id the game chose, so the database rejects a repeat.</p>
+            <div class="table-scroll">
+              <table class="schema">
+                <caption>Table: scores</caption>
+                <thead><tr><th>Column</th><th>Type</th><th>Note</th></tr></thead>
+                <tbody>
+                  <tr><td>match_id</td><td>text</td><td>primary key, chosen by the game</td></tr>
+                  <tr><td>user_id</td><td>text</td><td>who played</td></tr>
+                  <tr><td>points</td><td>integer</td><td>earned in this match</td></tr>
+                  <tr><td>created_at</td><td>timestamp</td><td>picks out this month's rows</td></tr>
+                </tbody>
+              </table>
+            </div>
+            <h4>2. Seeing the board and my rank</h4>
+            <p>The simplest version is one SQL query on that table: add up points per player for this month, sort, and take the first 10. "My rank" counts the players whose total beats mine. It works, so we start there.</p>
+          </div>
+
+          <figure class="diagram-fig">
+            <div class="diagram-scroll" tabindex="0" role="group" aria-label="Diagram: simple leaderboard architecture. Scrollable on small screens.">
+              <svg class="diagram" viewBox="0 0 760 330" role="img" aria-labelledby="2026-10-31-leaderboard-d1-t 2026-10-31-leaderboard-d1-d">
+                <title id="2026-10-31-leaderboard-d1-t">Simple leaderboard architecture</title>
+                <desc id="2026-10-31-leaderboard-d1-d">A client calls a game app. To record a match the app saves a row in a database. To show the board it asks the same database to sum points per player and sort them, and gets the answer back. A sign beside the database shows the scores table.</desc>
+                <g class="d-node grass" style="--i:0"><rect x="2" y="120" width="62" height="60"/><text class="d-text" x="33" y="155" text-anchor="middle">Client</text></g>
+                <path class="d-edge accent" style="--i:1" d="M64 150H144"/><path class="d-arrow accent" style="--i:1" d="M138 144L146 150L138 156Z"/><path class="d-arrow accent" style="--i:1" d="M70 144L62 150L70 156Z"/>
+                <text class="d-label" style="--i:1" x="104" y="140" text-anchor="middle">request</text>
+                <g class="d-node cmd" style="--i:2"><rect x="144" y="98" width="170" height="104"/><text class="d-text" x="229" y="124" text-anchor="middle">Game app</text><text class="d-item" x="158" y="150">- save each match row</text><text class="d-item" x="158" y="170">- sum points, sort</text><text class="d-item" x="158" y="190">- reply with the board</text></g>
+                <path class="d-edge accent" style="--i:3" d="M314 120H400V90H520"/><path class="d-arrow accent" style="--i:3" d="M514 84L522 90L514 96Z"/>
+                <text class="d-label" style="--i:3" x="410" y="80">save row</text>
+                <path class="d-edge" style="--i:3" d="M314 180H400V150H520"/><path class="d-arrow" style="--i:3" d="M514 144L522 150L514 156Z"/><path class="d-arrow" style="--i:3" d="M320 174L312 180L320 186Z"/>
+                <text class="d-label" style="--i:3" x="410" y="140">sum, sort</text>
+                <g class="d-node chest" style="--i:4"><rect x="520" y="50" width="230" height="130"/><text class="d-text" x="635" y="104" text-anchor="middle">Database</text><text class="d-sub" x="635" y="126" text-anchor="middle">one primary</text></g>
+                <path class="d-line" style="--i:4" d="M635 180V196"/>
+                <g class="d-note" style="--i:4"><rect x="520" y="196" width="190" height="104"/><text class="d-note-t" x="532" y="216">scores</text><text class="d-mono" x="532" y="236">match_id  PK</text><text class="d-mono" x="532" y="254">user_id, points</text><text class="d-mono" x="532" y="272">created_at</text></g>
+                <rect class="d-packet" x="-6" y="-6" width="12" height="12" opacity="0"><animateMotion dur="8s" begin="1.4s" repeatCount="indefinite" keyPoints="0;1;1" keyTimes="0;.45;1" calcMode="linear" path="M64 150H229V120H400V90H520"/><animate attributeName="opacity" dur="8s" begin="1.4s" repeatCount="indefinite" values="0;1;1;0;0" keyTimes="0;.02;.43;.45;1"/></rect>
+                <rect class="d-packet alt" x="-6" y="-6" width="12" height="12" opacity="0"><animateMotion dur="8s" begin="1.4s" repeatCount="indefinite" keyPoints="0;0;1;1" keyTimes="0;.5;.95;1" calcMode="linear" path="M64 150H229V180H400V150H520"/><animate attributeName="opacity" dur="8s" begin="1.4s" repeatCount="indefinite" values="0;0;1;1;0;0" keyTimes="0;.5;.51;.94;.95;1"/></rect>
+              </svg>
+            </div>
+            <figcaption>The starting point: one app tier and one database. Gold = a match being saved, cyan = a player asking for the board.</figcaption>
+            <button class="replay" type="button" aria-label="Replay diagram animation">Replay</button>
+          </figure>
+
+          <aside class="callout why reveal">
+            <span class="callout-label">Why</span>
+            <p><strong>Why does the game choose the match id?</strong> If the server made it, a retry after a timeout would look like a new match.</p>
+          </aside>
+        </section>
+
+        <section class="sec" id="2026-10-31-leaderboard-sec-deepdives">
+          <h3>Deep dives</h3>
+          <div class="dive reveal">
+            <h4>How do we rank millions of players fast?</h4>
+            <p>Your rank is "how many players have more points than me, plus one". Counting must take milliseconds.</p>
+            <ol class="options">
+              <li><strong>Sum and sort in SQL on every view.</strong> It reads millions of rows each time.</li>
+              <li><strong>Keep a totals table with an <dfn class="term" title="A sorted lookup list the database keeps beside a table, like a book's index.">index</dfn> on the total.</strong> The top 10 is quick, but the rank still means counting every row ahead of you.</li>
+              <li class="pick"><strong>A <dfn class="term" title="A very fast database that keeps its data in memory.">Redis</dfn> <dfn class="term" title="A list of names, each with a number, kept in order by that number at all times.">sorted set</dfn>.</strong><span class="pick-tag">Pick</span> It stays ordered as points arrive, so rank is a lookup.</li>
+            </ol>
+            <p>One sorted set per month (key <code>lb:2026-10</code>) holds each player with their total as the score. Adding points, reading the top 10 and finding a rank each take about log N steps: milliseconds for millions. At about 100 bytes a player (an assumption), 5 million players need roughly half a gigabyte, which fits in one machine's memory.</p>
+          </div>
+
+          <div class="dive reveal">
+            <h4>How do we keep scores safe and fresh?</h4>
+            <p>Redis lives in memory, so a restart could leave the board empty or wrong.</p>
+            <ol class="options">
+              <li><strong>Redis only.</strong> A crash loses every score.</li>
+              <li><strong>Write both from the app at once.</strong> If one write fails, the two disagree for good.</li>
+              <li class="pick"><strong>Database first, then Redis, plus a rebuild job.</strong><span class="pick-tag">Pick</span> The table is the truth and Redis is a rebuildable view.</li>
+            </ol>
+            <p>The writer saves the row, then adds the points to Redis. The match id blocks a repeat before the Redis step. A rebuild job sums points per player from the table and refills Redis, nightly and after any Redis loss. If a server crashes between the two writes, the board misses those points until the next rebuild, which is fine for a game board but not for money.</p>
+          </div>
+
+          <div class="reveal">
+            <h4>Final design</h4>
+            <p>The dives added Redis for ranking and a rebuild job to repair it. The <dfn class="term" title="The single front door that sends each request to the right service.">API gateway</dfn> splits traffic by job: players view the board far more often than they finish matches, so the reader scales on its own.</p>
+            <p>There is no separate cache, because Redis is already the in-memory copy. If the primary database dies, its <dfn class="term" title="A kept-up-to-date copy of a database that takes over if the main one dies.">replica</dfn> takes over. If Redis is down, the reader returns 503 while the writer still saves the row and replies 201; the rebuild job catches up later.</p>
+          </div>
+
+          <figure class="diagram-fig" id="2026-10-31-leaderboard-final">
+            <div class="diagram-scroll" tabindex="0" role="group" aria-label="Diagram: the final leaderboard design. Scrollable on small screens.">
+              <svg class="diagram" viewBox="0 0 760 560" role="img" aria-labelledby="2026-10-31-leaderboard-d2-t 2026-10-31-leaderboard-d2-d">
+                <title id="2026-10-31-leaderboard-d2-t">Final leaderboard design</title>
+                <desc id="2026-10-31-leaderboard-d2-d">A client talks to an API gateway. POST /scores goes to the score writer, which saves a row in the database and adds the points to the Redis sorted set. GET /leaderboard and GET /leaderboard/me go to the board reader, which reads ranks from Redis. A rebuild job reads point sums from the database and refills Redis. Signs show the scores table and the Redis sorted set.</desc>
+                <g class="d-node grass" style="--i:0"><rect x="2" y="132" width="62" height="60"/><text class="d-text" x="33" y="167" text-anchor="middle">Client</text></g>
+                <path class="d-edge" style="--i:1" d="M64 162H90"/><path class="d-arrow" style="--i:1" d="M84 156L92 162L84 168Z"/><path class="d-arrow" style="--i:1" d="M70 156L62 162L70 168Z"/>
+                <g class="d-node" style="--i:1"><rect x="90" y="20" width="90" height="284"/><text class="d-text" x="135" y="137" text-anchor="middle">API</text><text class="d-text" x="135" y="155" text-anchor="middle">gateway</text><text class="d-item" x="100" y="183">- one door</text><text class="d-item" x="100" y="203">- by path</text></g>
+                <path class="d-edge accent" style="--i:2" d="M180 62H326"/><path class="d-arrow accent" style="--i:2" d="M320 56L328 62L320 68Z"/>
+                <text class="d-label" style="--i:2" x="253" y="40" text-anchor="middle">POST</text>
+                <text class="d-label" style="--i:2" x="253" y="54" text-anchor="middle">/scores</text>
+                <path class="d-edge" style="--i:2" d="M180 270H326"/><path class="d-arrow" style="--i:2" d="M320 264L328 270L320 276Z"/>
+                <text class="d-label" style="--i:2" x="253" y="224" text-anchor="middle">GET</text>
+                <text class="d-label" style="--i:2" x="253" y="238" text-anchor="middle">/leaderboard</text>
+                <text class="d-label" style="--i:2" x="253" y="252" text-anchor="middle">/leaderboard/me</text>
+                <g class="d-node cmd" style="--i:3"><rect x="326" y="20" width="170" height="104"/><text class="d-text" x="411" y="46" text-anchor="middle">Score writer</text><text class="d-item" x="340" y="72">- ignore repeat match</text><text class="d-item" x="340" y="92">- save the match row</text><text class="d-item" x="340" y="112">- add points in Redis</text></g>
+                <g class="d-node cmd" style="--i:3"><rect x="326" y="200" width="170" height="104"/><text class="d-text" x="411" y="226" text-anchor="middle">Board reader</text><text class="d-item" x="340" y="252">- top 10 from Redis</text><text class="d-item" x="340" y="272">- my rank and nearby</text><text class="d-item" x="340" y="292">- read only</text></g>
+                <path class="d-edge accent" style="--i:4" d="M496 62H540V174H616"/><path class="d-arrow accent" style="--i:4" d="M610 168L618 174L610 180Z"/>
+                <text class="d-label" style="--i:4" x="578" y="164" text-anchor="middle">save row</text>
+                <path class="d-edge accent" style="--i:4" d="M496 100H520V398H616"/><path class="d-arrow accent" style="--i:4" d="M610 392L618 398L610 404Z"/><path class="d-arrow accent" style="--i:4" d="M502 94L494 100L502 106Z"/>
+                <text class="d-label" style="--i:4" x="530" y="388">add points</text>
+                <path class="d-edge" style="--i:4" d="M496 270H500V414H616"/><path class="d-arrow" style="--i:4" d="M610 408L618 414L610 420Z"/><path class="d-arrow" style="--i:4" d="M502 264L494 270L502 276Z"/>
+                <text class="d-label" style="--i:4" x="530" y="434">read board</text>
+                <g class="d-note" style="--i:5"><rect x="568" y="20" width="190" height="104"/><text class="d-note-t" x="580" y="40">scores</text><text class="d-mono" x="580" y="60">match_id  PK</text><text class="d-mono" x="580" y="78">user_id, points</text><text class="d-mono" x="580" y="96">created_at</text></g>
+                <path class="d-line" style="--i:5" d="M687 124V144"/>
+                <g class="d-node chest" style="--i:5"><rect x="616" y="144" width="142" height="60"/><text class="d-text" x="687" y="170" text-anchor="middle">Database</text><text class="d-sub" x="687" y="190" text-anchor="middle">primary + replica</text></g>
+                <path class="d-edge" style="--i:6" d="M687 204V244"/><path class="d-arrow" style="--i:6" d="M681 238L687 246L693 238Z"/>
+                <text class="d-label" style="--i:6" x="677" y="228" text-anchor="end">sum points</text>
+                <g class="d-node furnace" style="--i:7"><rect x="616" y="244" width="142" height="84"/><text class="d-text" x="687" y="270" text-anchor="middle">Rebuild job</text><text class="d-item" x="626" y="296">- sum per player</text><text class="d-item" x="626" y="316">- refill Redis</text></g>
+                <path class="d-edge" style="--i:8" d="M687 328V368"/><path class="d-arrow" style="--i:8" d="M681 362L687 370L693 362Z"/>
+                <text class="d-label" style="--i:8" x="677" y="352" text-anchor="end">refill</text>
+                <g class="d-node gem" style="--i:9"><rect x="616" y="368" width="142" height="60"/><text class="d-text" x="687" y="394" text-anchor="middle">Redis</text><text class="d-sub" x="687" y="414" text-anchor="middle">sorted set</text></g>
+                <path class="d-line" style="--i:9" d="M687 428V448"/>
+                <g class="d-note" style="--i:9"><rect x="568" y="448" width="190" height="92"/><text class="d-note-t" x="580" y="468">leaderboard</text><text class="d-mono" x="580" y="488">key  lb:2026-10</text><text class="d-mono" x="580" y="506">member  user_id</text><text class="d-mono" x="580" y="524">score  total points</text></g>
+                <rect class="d-packet" x="-6" y="-6" width="12" height="12" opacity="0"><animateMotion dur="8s" begin="1.6s" repeatCount="indefinite" keyPoints="0;1;1" keyTimes="0;.45;1" calcMode="linear" path="M64 162H135V62H540V174H616"/><animate attributeName="opacity" dur="8s" begin="1.6s" repeatCount="indefinite" values="0;1;1;0;0" keyTimes="0;.02;.43;.45;1"/></rect>
+                <rect class="d-packet alt" x="-6" y="-6" width="12" height="12" opacity="0"><animateMotion dur="8s" begin="1.6s" repeatCount="indefinite" keyPoints="0;0;1;1" keyTimes="0;.5;.95;1" calcMode="linear" path="M64 162H135V270H500V414H616"/><animate attributeName="opacity" dur="8s" begin="1.6s" repeatCount="indefinite" values="0;0;1;1;0;0" keyTimes="0;.5;.51;.94;.95;1"/></rect>
+              </svg>
+            </div>
+            <figcaption>The complete system. Gold = a match being saved, cyan = a player viewing the board. Signs show what each store holds.</figcaption>
+            <button class="replay" type="button" aria-label="Replay diagram animation">Replay</button>
+          </figure>
+
+          <div class="next reveal">
+            <h4>What you could add next</h4>
+            <ul class="next-list">
+              <li>Split players across several sorted sets if one machine's memory fills up.</li>
+              <li>Cache the top 10 for a second, so a viral moment does not hammer Redis.</li>
+              <li>A friends-only board.</li>
+            </ul>
+          </div>
+        </section>
+
+        <section class="sec reveal" id="2026-10-31-leaderboard-sec-tips">
+          <h3>Interview tips</h3>
+          <dl class="qa">
+            <div><dt>What if two players tie?</dt><dd>Redis orders ties by player id. To rank whoever got there first higher, fold the time into the score.</dd></div>
+            <div><dt>What if the board does not fit on one machine?</dt><dd>Split players across several sorted sets, then merge each one's top 10 to get the overall top 10.</dd></div>
+            <div><dt>How do you reset every month?</dt><dd>Use a new key per month. No mass update is needed.</dd></div>
+          </dl>
+          <h4>Common mistakes</h4>
+          <ul class="mistakes">
+            <li>Sorting the whole table on every request.</li>
+            <li>Treating Redis as the only copy, so a restart wipes out the scores.</li>
+          </ul>
+          <aside class="callout tip">
+            <span class="callout-label">Interview tip</span>
+            <p>Say which store is the truth and which is the fast view.</p>
+          </aside>
+          <aside class="callout confidence">
+            <span class="callout-label">Confidence note</span>
+            <p>The player counts, the 10x peak and the 100 bytes per player are assumptions. For a small board, a plain SQL index is a valid answer.</p>
+          </aside>
+        </section>
+
+        <p class="sources">Sources: Redis docs, <a href="https://redis.io/docs/latest/develop/data-types/sorted-sets/">Sorted sets</a>; Alex Xu and Sahn Lam, <em>System Design Interview</em> (Vol. 2), "Real-time gaming leaderboard" chapter; Hello Interview, <a href="https://www.hellointerview.com/learn/system-design/in-a-hurry/delivery">delivery framework</a>.</p>
+      </div>
+    </article>
     <article class="entry" id="2026-10-30-notification-system" data-topic="Notification system" data-domain="Queues &amp; async jobs" data-date="2026-10-30" data-level="1">
       <header class="entry-head">
         <div class="entry-meta">
