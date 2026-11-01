@@ -420,6 +420,7 @@ dfn.term{font-style:normal;border-bottom:2px dotted var(--accent);cursor:help}
       <h2><svg viewBox="0 0 12 12" aria-hidden="true"><path fill="#7A4A2A" d="M0 2h12v9H0z"/><path fill="#A86A3C" d="M1 3h10v3H1zM1 7h10v3H1z"/><path fill="#E9B526" d="M5 5h2v3H5z"/><path fill="#4A2C18" d="M0 6h5v1H0zM7 6h5v1H7z"/></svg>Archive</h2>
       <ol class="toc">
         <!-- TOC -->
+        <li><a href="#2026-11-01-search-autocomplete"><time datetime="2026-11-01">2026-11-01</time><span>Search autocomplete: answers ready before you finish typing</span></a></li>
         <li><a href="#2026-10-31-leaderboard"><time datetime="2026-10-31">2026-10-31</time><span>Leaderboard: ranking millions without sorting them</span></a></li>
         <li><a href="#2026-10-30-notification-system"><time datetime="2026-10-30">2026-10-30</time><span>Notification system: send it later, send it once</span></a></li>
         <li><a href="#2026-10-29-pastebin"><time datetime="2026-10-29">2026-10-29</time><span>Pastebin: a tiny record plus a big blob</span></a></li>
@@ -432,6 +433,255 @@ dfn.term{font-style:normal;border-bottom:2px dotted var(--accent);cursor:help}
 
   <main id="entries" tabindex="-1">
     <!-- ENTRIES -->
+    <article class="entry" id="2026-11-01-search-autocomplete" data-topic="Search autocomplete" data-domain="Search" data-date="2026-11-01" data-level="2">
+      <header class="entry-head">
+        <div class="entry-meta">
+          <span class="chip">Search</span>
+          <span class="level" title="Difficulty: level 2 of 3">Lv 2</span>
+          <time datetime="2026-11-01">1 Nov 2026</time>
+          <span class="read"><span class="read-time">4</span> min read</span>
+        </div>
+        <h2 class="entry-title">Design search autocomplete</h2>
+        <p class="lede">You type "wea" and the search box offers "weather", "weather today" and "web series". It is a good question because the answer is needed on every key press, so it must be prepared ahead.</p>
+        <nav class="steps" aria-label="Sections of this design">
+          <a href="#2026-11-01-search-autocomplete-sec-functional">Features</a>
+          <a href="#2026-11-01-search-autocomplete-sec-nonfunctional">Qualities</a>
+          <a href="#2026-11-01-search-autocomplete-sec-entities">Entities</a>
+          <a href="#2026-11-01-search-autocomplete-sec-api">API</a>
+          <a href="#2026-11-01-search-autocomplete-sec-hld">Design</a>
+          <a href="#2026-11-01-search-autocomplete-sec-deepdives">Deep dives</a>
+          <a href="#2026-11-01-search-autocomplete-sec-tips">Tips</a>
+        </nav>
+      </header>
+
+      <div class="prose">
+        <details class="legend">
+          <summary>Legend <span class="hint">6 terms used below</span></summary>
+          <dl>
+            <div><dt>Prefix</dt><dd>The first letters of a word, as typed so far. "wea" is a prefix of "weather".</dd></div>
+            <div><dt>Cache</dt><dd>A fast store, usually in memory, that holds answers that are ready to use. Reading from it is much quicker than working the answer out again.</dd></div>
+            <div><dt>TTL</dt><dd>"Time to live": how long a cached entry is kept before it is thrown away.</dd></div>
+            <div><dt>Queue</dt><dd>A line of messages. One part of the system drops a message in, and another part picks it up later, in its own time.</dd></div>
+            <div><dt>API gateway</dt><dd>The single front door of a system. It receives every request and sends each one to the right service.</dd></div>
+            <div><dt>Replica</dt><dd>A copy of a database that is kept up to date. It takes over if the main copy (the primary) dies.</dd></div>
+          </dl>
+        </details>
+
+        <section class="sec reveal" id="2026-11-01-search-autocomplete-sec-functional">
+          <h3>Functional requirements</h3>
+          <ul class="reqs">
+            <li>While I type, I see up to 5 searches that start with my <dfn class="term" title="The first letters of a word, as typed so far.">prefix</dfn>, most popular first.</li>
+            <li>Every search I run is counted, so popular searches rise over time.</li>
+          </ul>
+          <p class="out">Out of scope: typo fixes, personal suggestions, other languages, blocking bad words.</p>
+        </section>
+
+        <section class="sec reveal" id="2026-11-01-search-autocomplete-sec-nonfunctional">
+          <h3>Non-functional requirements</h3>
+          <ul class="reqs nfr">
+            <li><strong>Fast.</strong> Suggestions must appear within about 100 ms, before the next key press.</li>
+            <li><strong>Popular first.</strong> The best 5 matter more than all matches.</li>
+            <li><strong>Fresh enough.</strong> A new trend can take an hour to appear. Nobody needs it instantly.</li>
+            <li><strong>Never blocks search.</strong> If suggestions break, typing and searching still work.</li>
+          </ul>
+        </section>
+
+        <section class="sec reveal" id="2026-11-01-search-autocomplete-sec-entities">
+          <h3>Core entities</h3>
+          <ul class="entities">
+            <li><strong>Query count:</strong> the search text and how many times people searched it.</li>
+            <li><strong>Suggestion list:</strong> for one prefix, its best 5 searches.</li>
+          </ul>
+        </section>
+
+        <section class="sec reveal" id="2026-11-01-search-autocomplete-sec-api">
+          <h3>API design</h3>
+          <div class="api-list">
+            <div class="api">
+              <div class="api-sig"><span class="method get">GET</span><code>/suggestions?q=wea&amp;limit=5</code></div>
+              <p>The prefix must be 1 to 50 characters, otherwise 400 Bad Request. An unknown prefix is not an error: it returns 200 with an empty list. The list is a fixed top 5, so it needs no cursor.</p>
+              <div class="io">
+                <div><span class="io-l">Request body</span><pre>(none)</pre></div>
+                <div><span class="io-l">Response 200 OK</span><pre>{
+  "prefix": "wea",
+  "suggestions": ["weather", "weather today"]
+}</pre></div>
+              </div>
+            </div>
+            <div class="api">
+              <div class="api-sig"><span class="method">POST</span><code>/searches</code></div>
+              <p>Records that a search happened. 202 Accepted, because the count is added a little later.</p>
+              <div class="io">
+                <div><span class="io-l">Request body</span><pre>{
+  "query": "weather today"
+}</pre></div>
+                <div><span class="io-l">Response 202 Accepted</span><pre>{ "status": "queued" }</pre></div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="sec" id="2026-11-01-search-autocomplete-sec-hld">
+          <h3>High-level design</h3>
+          <div class="reveal">
+            <p>Assume the usual setup: identical app servers that keep no data, behind a load balancer. Assume 100 million searches a day, and about 5 suggestion requests per search, because the browser skips keys typed in quick succession. That is 500 million requests a day, about 6,000 a second (500M / 86,400), maybe 3 times that at peak. Counting searches is only about 1,150 writes a second, so reads dominate.</p>
+            <h4>1. Showing suggestions</h4>
+            <p>The simplest version keeps one row per search text with its count. An ordered index on the text puts all rows that start with "wea" side by side. The app asks for those rows, sorts them by count and returns the top 5.</p>
+            <h4>2. Counting searches</h4>
+            <p>Each search adds 1 to its row, or creates it with a count of 1.</p>
+            <div class="table-scroll">
+              <table class="schema">
+                <caption>Table: query_counts</caption>
+                <thead><tr><th>Column</th><th>Type</th><th>Note</th></tr></thead>
+                <tbody>
+                  <tr><td>query</td><td>text</td><td>primary key, ordered index serves prefix lookups</td></tr>
+                  <tr><td>count</td><td>integer</td><td>times searched</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <figure class="diagram-fig">
+            <div class="diagram-scroll" tabindex="0" role="group" aria-label="Diagram: simple autocomplete architecture. Scrollable on small screens.">
+              <svg class="diagram" viewBox="0 0 760 330" role="img" aria-labelledby="2026-11-01-search-autocomplete-d1-t 2026-11-01-search-autocomplete-d1-d">
+                <title id="2026-11-01-search-autocomplete-d1-t">Simple autocomplete architecture</title>
+                <desc id="2026-11-01-search-autocomplete-d1-d">A client calls an app. To show suggestions the app asks the database for rows starting with the prefix, sorted by count, and gets them back. To record a search the app adds one to a row. A sign beside the database shows the query_counts table.</desc>
+                <g class="d-node grass" style="--i:0"><rect x="2" y="120" width="62" height="60"/><text class="d-text" x="33" y="155" text-anchor="middle">Client</text></g>
+                <path class="d-edge accent" style="--i:1" d="M64 150H144"/><path class="d-arrow accent" style="--i:1" d="M138 144L146 150L138 156Z"/><path class="d-arrow accent" style="--i:1" d="M70 144L62 150L70 156Z"/>
+                <text class="d-label" style="--i:1" x="104" y="140" text-anchor="middle">request</text>
+                <g class="d-node cmd" style="--i:2"><rect x="144" y="98" width="170" height="104"/><text class="d-text" x="229" y="124" text-anchor="middle">App</text><text class="d-item" x="158" y="150">- find rows by prefix</text><text class="d-item" x="158" y="170">- sort, keep top 5</text><text class="d-item" x="158" y="190">- add 1 per search</text></g>
+                <path class="d-edge accent" style="--i:3" d="M314 120H400V90H520"/><path class="d-arrow accent" style="--i:3" d="M514 84L522 90L514 96Z"/><path class="d-arrow accent" style="--i:3" d="M320 114L312 120L320 126Z"/>
+                <text class="d-label" style="--i:3" x="410" y="80">prefix rows</text>
+                <path class="d-edge" style="--i:3" d="M314 180H400V150H520"/><path class="d-arrow" style="--i:3" d="M514 144L522 150L514 156Z"/>
+                <text class="d-label" style="--i:3" x="410" y="140">add 1</text>
+                <g class="d-node chest" style="--i:4"><rect x="520" y="50" width="230" height="130"/><text class="d-text" x="635" y="104" text-anchor="middle">Database</text><text class="d-sub" x="635" y="126" text-anchor="middle">one primary</text></g>
+                <path class="d-line" style="--i:4" d="M635 180V196"/>
+                <g class="d-note" style="--i:4"><rect x="520" y="196" width="190" height="84"/><text class="d-note-t" x="532" y="216">query_counts</text><text class="d-mono" x="532" y="238">query  PK</text><text class="d-mono" x="532" y="258">count</text></g>
+                <rect class="d-packet" x="-6" y="-6" width="12" height="12" opacity="0"><animateMotion dur="8s" begin="1.4s" repeatCount="indefinite" keyPoints="0;0;1;1" keyTimes="0;.05;.45;1" calcMode="linear" path="M64 150H229V180H400V150H520"/><animate attributeName="opacity" dur="8s" begin="1.4s" repeatCount="indefinite" values="0;0;1;1;0;0" keyTimes="0;.05;.06;.44;.45;1"/></rect>
+                <rect class="d-packet alt" x="-6" y="-6" width="12" height="12" opacity="0"><animateMotion dur="8s" begin="1.4s" repeatCount="indefinite" keyPoints="0;0;1;1" keyTimes="0;.5;.95;1" calcMode="linear" path="M64 150H229V120H400V90H520"/><animate attributeName="opacity" dur="8s" begin="1.4s" repeatCount="indefinite" values="0;0;1;1;0;0" keyTimes="0;.5;.51;.94;.95;1"/></rect>
+              </svg>
+            </div>
+            <figcaption>The starting point: one app tier and one database. Gold = a search being counted, cyan = a prefix being looked up.</figcaption>
+            <button class="replay" type="button" aria-label="Replay diagram animation">Replay</button>
+          </figure>
+
+          <aside class="callout why reveal">
+            <span class="callout-label">Why</span>
+            <p><strong>Why is slightly old data fine here?</strong> A list that is an hour old still looks right. That lets us prepare answers ahead of time instead of working them out on every key press.</p>
+          </aside>
+        </section>
+
+        <section class="sec" id="2026-11-01-search-autocomplete-sec-deepdives">
+          <h3>Deep dives</h3>
+          <div class="dive reveal">
+            <h4>How do we answer a prefix in milliseconds?</h4>
+            <p>A short prefix like "w" matches millions of rows.</p>
+            <ol class="options">
+              <li><strong>Query the table on every key.</strong> Short prefixes scan and sort huge lists.</li>
+              <li><strong>A tree of letters in each server's memory.</strong> Each node holds its best 5. Very fast, but every server must load and refresh its own copy.</li>
+              <li class="pick"><strong>A shared <dfn class="term" title="A fast store, usually in memory, that holds ready-made answers.">cache</dfn> of prefix to top 5.</strong><span class="pick-tag">Pick</span> One lookup, and every server shares one copy.</li>
+            </ol>
+            <p>The key is the prefix ("wea") and the value is the 5 best searches, a flattened version of the tree idea. To stay small, keep prefixes up to 20 characters and searches made at least 10 times (an assumption). Entries have a <dfn class="term" title="Time to live: how long a cached entry is kept.">TTL</dfn> of 2 hours. A miss does not fall back to the slow query: the service returns an empty list.</p>
+          </div>
+
+          <div class="dive reveal">
+            <h4>How do counts stay up to date without slowing search?</h4>
+            <p>Each search must be counted, and the prepared lists must change as counts change.</p>
+            <ol class="options">
+              <li><strong>Update the count inside the search request.</strong> About 1,150 writes a second on one table, and the user waits for each.</li>
+              <li class="pick"><strong>Put each search on a <dfn class="term" title="A line of messages. One part drops them in, another picks them up later.">queue</dfn>, add up in batches, rebuild hourly.</strong><span class="pick-tag">Pick</span> The request returns at once.</li>
+            </ol>
+            <p>The logger replies 202 and queues the search. An aggregator worker reads a batch, adds up repeats in memory and writes each distinct search once. An hourly builder job reads the popular rows, works out the top 5 for every prefix and writes them to the cache. If the queue is down, the logger drops the event: counts run a little low, which is fine here. If the builder fails, old lists stay until their TTL ends.</p>
+          </div>
+
+          <div class="reveal">
+            <h4>Final design</h4>
+            <p>The dives added the prefix cache and the queue, aggregator and builder behind it. The <dfn class="term" title="The single front door that sends each request to the right service.">API gateway</dfn> splits traffic by job: suggestion requests outnumber searches about 5 to 1, so the suggest service can be scaled alone.</p>
+            <p>The database has a <dfn class="term" title="A kept-up-to-date copy of a database that takes over if the main one dies.">replica</dfn> that takes over if the primary dies. If the cache is down, the suggest service returns 200 with an empty list, and searching still works.</p>
+          </div>
+
+          <figure class="diagram-fig" id="2026-11-01-search-autocomplete-final">
+            <div class="diagram-scroll" tabindex="0" role="group" aria-label="Diagram: the final autocomplete design. Scrollable on small screens.">
+              <svg class="diagram" viewBox="0 0 760 700" role="img" aria-labelledby="2026-11-01-search-autocomplete-d2-t 2026-11-01-search-autocomplete-d2-d">
+                <title id="2026-11-01-search-autocomplete-d2-t">Final autocomplete design</title>
+                <desc id="2026-11-01-search-autocomplete-d2-d">A client talks to an API gateway. POST /searches goes to the search logger, which puts an event on a queue. An aggregator reads the queue and adds counts to the database. An hourly prefix builder reads the counts and writes prefix to top 5 entries into the cache. GET /suggestions goes to the suggest service, which reads the cache. Signs show the queue message, the query_counts table and the cache entries.</desc>
+                <g class="d-node grass" style="--i:0"><rect x="2" y="300" width="62" height="60"/><text class="d-text" x="33" y="335" text-anchor="middle">Client</text></g>
+                <path class="d-edge" style="--i:1" d="M64 330H90"/><path class="d-arrow" style="--i:1" d="M84 324L92 330L84 336Z"/><path class="d-arrow" style="--i:1" d="M70 324L62 330L70 336Z"/>
+                <g class="d-node" style="--i:1"><rect x="90" y="20" width="90" height="640"/><text class="d-text" x="135" y="327" text-anchor="middle">API</text><text class="d-text" x="135" y="345" text-anchor="middle">gateway</text><text class="d-item" x="100" y="373">- one door</text><text class="d-item" x="100" y="393">- by path</text></g>
+                <path class="d-edge accent" style="--i:2" d="M180 70H290"/><path class="d-arrow accent" style="--i:2" d="M284 64L292 70L284 76Z"/>
+                <text class="d-label" style="--i:2" x="235" y="40" text-anchor="middle">POST</text>
+                <text class="d-label" style="--i:2" x="235" y="54" text-anchor="middle">/searches</text>
+                <path class="d-edge" style="--i:2" d="M180 590H290"/><path class="d-arrow" style="--i:2" d="M284 584L292 590L284 596Z"/><path class="d-arrow" style="--i:2" d="M186 584L178 590L186 596Z"/>
+                <text class="d-label" style="--i:2" x="235" y="560" text-anchor="middle">GET</text>
+                <text class="d-label" style="--i:2" x="235" y="574" text-anchor="middle">/suggestions</text>
+                <g class="d-node cmd" style="--i:3"><rect x="290" y="20" width="160" height="114"/><text class="d-text" x="370" y="46" text-anchor="middle">Logger</text><text class="d-item" x="302" y="72">- check text length</text><text class="d-item" x="302" y="92">- queue the search</text><text class="d-item" x="302" y="112">- reply 202 at once</text></g>
+                <g class="d-node cmd" style="--i:3"><rect x="290" y="540" width="160" height="114"/><text class="d-text" x="370" y="566" text-anchor="middle">Suggest</text><text class="d-item" x="302" y="592">- read prefix from</text><text class="d-item" x="312" y="612">the cache</text><text class="d-item" x="302" y="632">- empty list on miss</text></g>
+                <path class="d-edge accent" style="--i:4" d="M450 70H610"/><path class="d-arrow accent" style="--i:4" d="M604 64L612 70L604 76Z"/>
+                <text class="d-label" style="--i:4" x="530" y="60" text-anchor="middle">search text</text>
+                <g class="d-node furnace" style="--i:5"><rect x="610" y="20" width="140" height="104"/><text class="d-text" x="680" y="46" text-anchor="middle">Queue</text><text class="d-sub" x="680" y="66" text-anchor="middle">search events</text><text class="d-item" x="622" y="92">- holds each search</text><text class="d-item" x="622" y="112">- until read</text></g>
+                <path class="d-line" style="--i:5" d="M610 100H590"/>
+                <g class="d-note" style="--i:5"><rect x="470" y="86" width="120" height="64"/><text class="d-note-t" x="480" y="106">message</text><text class="d-mono" x="480" y="126">query  text</text><text class="d-mono" x="480" y="142">at  time</text></g>
+                <path class="d-edge accent" style="--i:6" d="M680 124V184"/><path class="d-arrow accent" style="--i:6" d="M674 178L680 186L686 178Z"/>
+                <text class="d-label" style="--i:6" x="670" y="160" text-anchor="end">next batch</text>
+                <g class="d-node furnace" style="--i:7"><rect x="610" y="184" width="140" height="84"/><text class="d-text" x="680" y="210" text-anchor="middle">Aggregator</text><text class="d-item" x="622" y="236">- add up repeats</text><text class="d-item" x="622" y="256">- one write each</text></g>
+                <path class="d-edge accent" style="--i:8" d="M680 268V328"/><path class="d-arrow accent" style="--i:8" d="M674 322L680 330L686 322Z"/>
+                <text class="d-label" style="--i:8" x="670" y="304" text-anchor="end">add counts</text>
+                <g class="d-node chest" style="--i:9"><rect x="610" y="328" width="140" height="64"/><text class="d-text" x="680" y="354" text-anchor="middle">Database</text><text class="d-sub" x="680" y="374" text-anchor="middle">primary + replica</text></g>
+                <path class="d-line" style="--i:9" d="M610 360H590"/>
+                <g class="d-note" style="--i:9"><rect x="440" y="326" width="150" height="64"/><text class="d-note-t" x="450" y="346">query_counts</text><text class="d-mono" x="450" y="366">query  PK</text><text class="d-mono" x="450" y="382">count</text></g>
+                <path class="d-edge" style="--i:10" d="M680 392V452"/><path class="d-arrow" style="--i:10" d="M674 446L680 454L686 446Z"/>
+                <text class="d-label" style="--i:10" x="670" y="428" text-anchor="end">popular rows</text>
+                <g class="d-node furnace" style="--i:11"><rect x="610" y="452" width="140" height="84"/><text class="d-text" x="680" y="478" text-anchor="middle">Builder job</text><text class="d-item" x="622" y="504">- runs every hour</text><text class="d-item" x="622" y="524">- top 5 per prefix</text></g>
+                <path class="d-edge accent" style="--i:12" d="M680 536V596"/><path class="d-arrow accent" style="--i:12" d="M674 590L680 598L686 590Z"/>
+                <text class="d-label" style="--i:12" x="670" y="572" text-anchor="end">top 5s</text>
+                <g class="d-node gem" style="--i:13"><rect x="610" y="596" width="140" height="64"/><text class="d-text" x="680" y="622" text-anchor="middle">Cache</text><text class="d-sub" x="680" y="642" text-anchor="middle">prefix lists</text></g>
+                <path class="d-line" style="--i:13" d="M610 612H590"/>
+                <g class="d-note" style="--i:13"><rect x="460" y="530" width="130" height="84"/><text class="d-note-t" x="470" y="550">prefix lists</text><text class="d-mono" x="470" y="570">key  prefix</text><text class="d-mono" x="470" y="588">val  top 5</text><text class="d-mono" x="470" y="606">TTL  2 hours</text></g>
+                <path class="d-edge" style="--i:14" d="M450 630H610"/><path class="d-arrow" style="--i:14" d="M604 624L612 630L604 636Z"/><path class="d-arrow" style="--i:14" d="M456 624L448 630L456 636Z"/>
+                <text class="d-label" style="--i:14" x="530" y="650" text-anchor="middle">get top 5</text>
+                <rect class="d-packet" x="-6" y="-6" width="12" height="12" opacity="0"><animateMotion dur="8s" begin="1.6s" repeatCount="indefinite" keyPoints="0;1;1" keyTimes="0;.45;1" calcMode="linear" path="M64 330H135V70H680V596"/><animate attributeName="opacity" dur="8s" begin="1.6s" repeatCount="indefinite" values="0;1;1;0;0" keyTimes="0;.02;.43;.45;1"/></rect>
+                <rect class="d-packet alt" x="-6" y="-6" width="12" height="12" opacity="0"><animateMotion dur="8s" begin="1.6s" repeatCount="indefinite" keyPoints="0;0;1;1" keyTimes="0;.5;.95;1" calcMode="linear" path="M64 330H135V590H370V630H610"/><animate attributeName="opacity" dur="8s" begin="1.6s" repeatCount="indefinite" values="0;0;1;1;0;0" keyTimes="0;.5;.51;.94;.95;1"/></rect>
+              </svg>
+            </div>
+            <figcaption>The complete system. Gold = a search being counted and turned into prefix lists, cyan = a prefix being looked up. Signs show what each store holds.</figcaption>
+            <button class="replay" type="button" aria-label="Replay diagram animation">Replay</button>
+          </figure>
+
+          <div class="next reveal">
+            <h4>What you could add next</h4>
+            <ul class="next-list">
+              <li>Let the browser and a CDN keep each reply for a minute (Cache-Control).</li>
+              <li>Weigh the last hour of searches more, so trends show up sooner.</li>
+              <li>Split the cache across several machines if it outgrows one.</li>
+            </ul>
+          </div>
+        </section>
+
+        <section class="sec reveal" id="2026-11-01-search-autocomplete-sec-tips">
+          <h3>Interview tips</h3>
+          <dl class="qa">
+            <div><dt>How do you show trending searches?</dt><dd>Count recent searches separately, weigh them higher, and run the builder more often.</dd></div>
+            <div><dt>How do you cut the number of requests?</dt><dd>The browser waits about 150 ms after the last key and reuses replies it already has.</dd></div>
+            <div><dt>How big is the cache?</dt><dd>Limit prefix length and keep only popular searches, then multiply entries by about 200 bytes to check it fits.</dd></div>
+          </dl>
+          <h4>Common mistakes</h4>
+          <ul class="mistakes">
+            <li>Running a prefix query on the database for every key press.</li>
+            <li>Counting the search inside the request, so the user waits for a write.</li>
+          </ul>
+          <aside class="callout tip">
+            <span class="callout-label">Interview tip</span>
+            <p>Say it early: the answers are prepared ahead, so a read is one lookup.</p>
+          </aside>
+          <aside class="callout confidence">
+            <span class="callout-label">Confidence note</span>
+            <p>The traffic numbers, the 5 requests per search, the threshold of 10 and the 2-hour TTL are assumptions. A letter tree in server memory is an equally valid answer.</p>
+          </aside>
+        </section>
+
+        <p class="sources">Sources: Alex Xu, <em>System Design Interview</em> (Vol. 1), "Design a search autocomplete system"; Hello Interview, <a href="https://www.hellointerview.com/learn/system-design/in-a-hurry/delivery">delivery framework</a>; Redis docs, <a href="https://redis.io/docs/latest/commands/expire/">EXPIRE</a>.</p>
+      </div>
+    </article>
     <article class="entry" id="2026-10-31-leaderboard" data-topic="Leaderboard" data-domain="Counters &amp; limits" data-date="2026-10-31" data-level="1">
       <header class="entry-head">
         <div class="entry-meta">
