@@ -420,6 +420,7 @@ dfn.term{font-style:normal;border-bottom:2px dotted var(--accent);cursor:help}
       <h2><svg viewBox="0 0 12 12" aria-hidden="true"><path fill="#7A4A2A" d="M0 2h12v9H0z"/><path fill="#A86A3C" d="M1 3h10v3H1zM1 7h10v3H1z"/><path fill="#E9B526" d="M5 5h2v3H5z"/><path fill="#4A2C18" d="M0 6h5v1H0zM7 6h5v1H7z"/></svg>Archive</h2>
       <ol class="toc">
         <!-- TOC -->
+        <li><a href="#2026-11-02-chat-app"><time datetime="2026-11-02">2026-11-02</time><span>Chat app: save first, then deliver</span></a></li>
         <li><a href="#2026-11-01-search-autocomplete"><time datetime="2026-11-01">2026-11-01</time><span>Search autocomplete: answers ready before you finish typing</span></a></li>
         <li><a href="#2026-10-31-leaderboard"><time datetime="2026-10-31">2026-10-31</time><span>Leaderboard: ranking millions without sorting them</span></a></li>
         <li><a href="#2026-10-30-notification-system"><time datetime="2026-10-30">2026-10-30</time><span>Notification system: send it later, send it once</span></a></li>
@@ -433,6 +434,282 @@ dfn.term{font-style:normal;border-bottom:2px dotted var(--accent);cursor:help}
 
   <main id="entries" tabindex="-1">
     <!-- ENTRIES -->
+    <article class="entry" id="2026-11-02-chat-app" data-topic="Chat app" data-domain="Real-time messaging" data-date="2026-11-02" data-level="2">
+      <header class="entry-head">
+        <div class="entry-meta">
+          <span class="chip">Real-time messaging</span>
+          <span class="level" title="Difficulty: level 2 of 3">Lv 2</span>
+          <time datetime="2026-11-02">2 Nov 2026</time>
+          <span class="read"><span class="read-time">4</span> min read</span>
+        </div>
+        <h2 class="entry-title">Design a chat app</h2>
+        <p class="lede">Alice sends "running late" and it pops up on Bob's phone a second later, even if Bob was offline an hour ago. It is a good question because the server must push to people instead of waiting to be asked, and must never lose a message.</p>
+        <nav class="steps" aria-label="Sections of this design">
+          <a href="#2026-11-02-chat-app-sec-functional">Features</a>
+          <a href="#2026-11-02-chat-app-sec-nonfunctional">Qualities</a>
+          <a href="#2026-11-02-chat-app-sec-entities">Entities</a>
+          <a href="#2026-11-02-chat-app-sec-api">API</a>
+          <a href="#2026-11-02-chat-app-sec-hld">Design</a>
+          <a href="#2026-11-02-chat-app-sec-deepdives">Deep dives</a>
+          <a href="#2026-11-02-chat-app-sec-tips">Tips</a>
+        </nav>
+      </header>
+
+      <div class="prose">
+        <details class="legend">
+          <summary>Legend <span class="hint">6 terms used below</span></summary>
+          <dl>
+            <div><dt>WebSocket</dt><dd>A connection between phone and server that stays open. Either side can send a message at any moment, with no new request each time.</dd></div>
+            <div><dt>Polling</dt><dd>Asking the server again and again, "anything new?", on a timer.</dd></div>
+            <div><dt>Cache</dt><dd>A fast store, usually in memory, that holds small facts that are ready to use.</dd></div>
+            <div><dt>TTL</dt><dd>"Time to live": how long an entry is kept before it expires on its own.</dd></div>
+            <div><dt>API gateway</dt><dd>The single front door of a system. It receives every request and sends each one to the right service.</dd></div>
+            <div><dt>Replica</dt><dd>A copy of a database that is kept up to date. It takes over if the main copy (the primary) dies.</dd></div>
+          </dl>
+        </details>
+
+        <section class="sec reveal" id="2026-11-02-chat-app-sec-functional">
+          <h3>Functional requirements</h3>
+          <ul class="reqs">
+            <li>Send a text message to one other person, who sees it within about a second.</li>
+            <li>Open a chat and scroll back through its older messages.</li>
+            <li>Messages sent while I was offline reach me when I come back.</li>
+          </ul>
+          <p class="out">Out of scope: group chats, images and files, read receipts, phone alerts, end-to-end encryption.</p>
+        </section>
+
+        <section class="sec reveal" id="2026-11-02-chat-app-sec-nonfunctional">
+          <h3>Non-functional requirements</h3>
+          <ul class="reqs nfr">
+            <li><strong>Real-time.</strong> A message that takes 10 seconds makes chat feel broken.</li>
+            <li><strong>No lost messages.</strong> Once Alice sees "sent", the message must survive a crash.</li>
+            <li><strong>Right order.</strong> Replies make no sense if they appear before the question.</li>
+            <li><strong>Always on.</strong> People chat all day, so losing one machine must not stop chat.</li>
+          </ul>
+        </section>
+
+        <section class="sec reveal" id="2026-11-02-chat-app-sec-entities">
+          <h3>Core entities</h3>
+          <ul class="entities">
+            <li><strong>Chat:</strong> the two people in one conversation.</li>
+            <li><strong>Message:</strong> who sent it, the text, and its place in the chat.</li>
+          </ul>
+        </section>
+
+        <section class="sec reveal" id="2026-11-02-chat-app-sec-api">
+          <h3>API design</h3>
+          <div class="api-list">
+            <div class="api">
+              <div class="api-sig"><span class="method get">GET</span><code>/connect</code></div>
+              <p>Opens a <dfn class="term" title="A connection that stays open so either side can send at any moment.">WebSocket</dfn>. The auth token says who the user is.</p>
+              <div class="io">
+                <div><span class="io-l">Request body</span><pre>(none)</pre></div>
+                <div><span class="io-l">Response 101 Switching Protocols</span><pre>(connection stays open)</pre></div>
+              </div>
+            </div>
+            <div class="api">
+              <div class="api-sig"><span class="method">POST</span><code>/chats/{chatId}/messages</code></div>
+              <p>Sent as a frame on the open connection, in the same shape as an HTTP call. The app makes <code>client_msg_id</code>, so a retry cannot duplicate. Over 2,000 characters gets 400, a non-member 403.</p>
+              <div class="io">
+                <div><span class="io-l">Request body</span><pre>{
+  "client_msg_id": "b7c1",
+  "text": "running late"
+}</pre></div>
+                <div><span class="io-l">Response 201 Created</span><pre>{
+  "chat_id": "c42",
+  "seq": 118,
+  "sent_at": "2026-11-02T09:30:00Z"
+}</pre></div>
+              </div>
+            </div>
+            <div class="api">
+              <div class="api-sig"><span class="method get">GET</span><code>/chats/{chatId}/messages?limit=50&amp;cursor=118</code></div>
+              <p>One page older than the cursor, newest first. After being offline, the app passes <code>after=117</code> to get everything newer.</p>
+              <div class="io">
+                <div><span class="io-l">Request body</span><pre>(none)</pre></div>
+                <div><span class="io-l">Response 200 OK</span><pre>{
+  "messages": [
+    { "seq": 118, "sender": "alice",
+      "text": "running late" }
+  ],
+  "next_cursor": "68"
+}</pre></div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="sec" id="2026-11-02-chat-app-sec-hld">
+          <h3>High-level design</h3>
+          <div class="reveal">
+            <p>Assume 10 million people send 10 messages a day. That is 100 million messages a day, about 1,150 a second (100M / 86,400), maybe 3 times that at peak. At roughly 100 bytes each that is 10 GB a day, so one database copes at first.</p>
+            <h4>1. Sending a message</h4>
+            <p>Alice's app opens a WebSocket to a chat server. She sends her text through it. The server gives the message the next number in that chat (<code>seq</code>), saves it, and writes it down Bob's connection if he is connected.</p>
+            <h4>2. Reading history</h4>
+            <p>Opening a chat reads a page of rows for that chat, newest first. The primary key (chat_id, seq) keeps one chat's rows together, so no other index is needed.</p>
+            <h4>3. Catching up</h4>
+            <p>A message for an offline Bob is already saved. When his app reconnects, it asks for everything after the last seq it has.</p>
+            <div class="table-scroll">
+              <table class="schema">
+                <caption>Table: messages</caption>
+                <thead><tr><th>Column</th><th>Type</th><th>Note</th></tr></thead>
+                <tbody>
+                  <tr><td>chat_id, seq</td><td>text, integer</td><td>primary key; seq counts 1, 2, 3 within a chat</td></tr>
+                  <tr><td>sender_id</td><td>text</td><td>who wrote it</td></tr>
+                  <tr><td>text</td><td>text</td><td>up to 2,000 characters</td></tr>
+                  <tr><td>client_msg_id</td><td>text</td><td>unique per chat, blocks duplicates</td></tr>
+                  <tr><td>sent_at</td><td>timestamp</td><td>shown in the app</td></tr>
+                </tbody>
+              </table>
+            </div>
+            <div class="table-scroll">
+              <table class="schema">
+                <caption>Table: chats</caption>
+                <thead><tr><th>Column</th><th>Type</th><th>Note</th></tr></thead>
+                <tbody>
+                  <tr><td>chat_id</td><td>text</td><td>primary key, a random UUID</td></tr>
+                  <tr><td>user_a, user_b</td><td>text</td><td>the two members</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <figure class="diagram-fig">
+            <div class="diagram-scroll" tabindex="0" role="group" aria-label="Diagram: simple chat architecture. Scrollable on small screens.">
+              <svg class="diagram" viewBox="0 0 760 330" role="img" aria-labelledby="2026-11-02-chat-app-d1-t 2026-11-02-chat-app-d1-d">
+                <title id="2026-11-02-chat-app-d1-t">Simple chat architecture</title>
+                <desc id="2026-11-02-chat-app-d1-d">Alice sends a message over her connection to one chat server. The server saves the message in the database, then pushes it down Bob's connection. A sign beside the database shows the messages table.</desc>
+                <g class="d-node grass" style="--i:0"><rect x="2" y="60" width="80" height="60"/><text class="d-text" x="42" y="95" text-anchor="middle">Alice</text></g>
+                <g class="d-node grass" style="--i:0"><rect x="2" y="210" width="80" height="60"/><text class="d-text" x="42" y="245" text-anchor="middle">Bob</text></g>
+                <path class="d-edge accent" style="--i:1" d="M82 90H136V130H190"/><path class="d-arrow accent" style="--i:1" d="M184 124L192 130L184 136Z"/><path class="d-arrow accent" style="--i:1" d="M88 84L80 90L88 96Z"/>
+                <text class="d-label" style="--i:1" x="90" y="80">1 send</text>
+                <g class="d-node cmd" style="--i:2"><rect x="190" y="110" width="190" height="114"/><text class="d-text" x="285" y="136" text-anchor="middle">Chat server</text><text class="d-item" x="202" y="162">- keep each user's socket</text><text class="d-item" x="202" y="182">- number it, save it</text><text class="d-item" x="202" y="202">- push to the recipient</text></g>
+                <path class="d-edge accent" style="--i:3" d="M380 160H540"/><path class="d-arrow accent" style="--i:3" d="M534 154L542 160L534 166Z"/>
+                <text class="d-label" style="--i:3" x="460" y="150" text-anchor="middle">2 save</text>
+                <g class="d-node chest" style="--i:4"><rect x="540" y="110" width="200" height="100"/><text class="d-text" x="640" y="150" text-anchor="middle">Database</text><text class="d-sub" x="640" y="172" text-anchor="middle">one primary</text></g>
+                <path class="d-line" style="--i:4" d="M640 210V226"/>
+                <g class="d-note" style="--i:4"><rect x="540" y="226" width="190" height="84"/><text class="d-note-t" x="552" y="246">messages</text><text class="d-mono" x="552" y="268">chat_id, seq  PK</text><text class="d-mono" x="552" y="288">sender, text, time</text></g>
+                <path class="d-edge" style="--i:5" d="M82 240H136V180H190"/><path class="d-arrow" style="--i:5" d="M88 234L80 240L88 246Z"/>
+                <text class="d-label" style="--i:5" x="90" y="230">3 push</text>
+                <rect class="d-packet" x="-6" y="-6" width="12" height="12" opacity="0"><animateMotion dur="8s" begin="1.4s" repeatCount="indefinite" keyPoints="0;1;1" keyTimes="0;.4;1" calcMode="linear" path="M82 90H136V130H285V160H540"/><animate attributeName="opacity" dur="8s" begin="1.4s" repeatCount="indefinite" values="0;1;1;0;0" keyTimes="0;.02;.38;.4;1"/></rect>
+                <rect class="d-packet alt" x="-6" y="-6" width="12" height="12" opacity="0"><animateMotion dur="8s" begin="1.4s" repeatCount="indefinite" keyPoints="0;0;1;1" keyTimes="0;.5;.95;1" calcMode="linear" path="M285 180H136V240H82"/><animate attributeName="opacity" dur="8s" begin="1.4s" repeatCount="indefinite" values="0;0;1;1;0;0" keyTimes="0;.5;.51;.94;.95;1"/></rect>
+              </svg>
+            </div>
+            <figcaption>The starting point: one chat server holding both connections. Gold = Alice's message being saved, cyan = it being pushed to Bob.</figcaption>
+            <button class="replay" type="button" aria-label="Replay diagram animation">Replay</button>
+          </figure>
+
+          <aside class="callout why reveal">
+            <span class="callout-label">Why</span>
+            <p><strong>Why a counter per chat, not a timestamp?</strong> Phone clocks can disagree. A counter inside one chat gives an order everyone agrees on.</p>
+          </aside>
+        </section>
+
+        <section class="sec" id="2026-11-02-chat-app-sec-deepdives">
+          <h3>Deep dives</h3>
+          <div class="dive reveal">
+            <h4>How does a message reach Bob in real time?</h4>
+            <p>One server cannot hold every open connection, so Alice and Bob are often on different servers. At about 50,000 connections per server (an assumption), a few million users online need dozens of servers.</p>
+            <ol class="options">
+              <li><strong><dfn class="term" title="Asking the server again and again whether anything is new.">Polling</dfn>.</strong> Messages arrive late and most requests return nothing.</li>
+              <li><strong>Tell every server.</strong> Each checks "is Bob mine?". Works, but most of the work is wasted.</li>
+              <li class="pick"><strong>Look up Bob's server in a <dfn class="term" title="A fast in-memory store for small, ready-to-use facts.">cache</dfn>.</strong><span class="pick-tag">Pick</span> One lookup, one forward.</li>
+            </ol>
+            <p>When Bob connects, his server writes user_id to its own address, with a <dfn class="term" title="Time to live: how long an entry lives before it expires.">TTL</dfn> of 60 seconds. His app sends a small ping every 20 seconds and the server renews the entry, so a crashed server's entries expire by themselves. No entry means Bob is offline, and the saved message waits. If the cache is down, messages are still saved and apps fall back to polling.</p>
+          </div>
+
+          <div class="dive reveal">
+            <h4>How do we never lose or reorder a message?</h4>
+            <p>Servers can crash at any step.</p>
+            <ol class="options">
+              <li><strong>Push first, save later.</strong> A crash in between loses a message Alice thinks was sent.</li>
+              <li class="pick"><strong>Save first, then push.</strong><span class="pick-tag">Pick</span> Anything Bob has seen is also stored.</li>
+            </ol>
+            <p>The message service reads the chat's latest seq and writes a row with seq + 1. If two writers pick the same number, the primary key rejects one and it retries. Alice gets 201 only after the row is saved. If that reply is lost, her retry carries the same client_msg_id and gets the existing row. The push is best effort: a gap in seq numbers, or a reconnect, makes Bob's app fetch what it missed.</p>
+          </div>
+
+          <div class="reveal">
+            <h4>Final design</h4>
+            <p>The dives added the presence cache and the save-first rule. The <dfn class="term" title="The single front door that sends each request to the right service.">API gateway</dfn> splits traffic by job, because holding sockets, saving messages and scrolling history load the system differently, and each can be scaled alone.</p>
+            <p>Seq numbers come from the primary. History reads use the <dfn class="term" title="A kept-up-to-date copy of a database that takes over if the main one dies.">replica</dfn>, which may be a moment behind, fine for old messages. If a connection server dies, its users reconnect to another and catch up.</p>
+          </div>
+
+          <figure class="diagram-fig" id="2026-11-02-chat-app-final">
+            <div class="diagram-scroll" tabindex="0" role="group" aria-label="Diagram: the final chat design. Scrollable on small screens.">
+              <svg class="diagram" viewBox="0 0 760 700" role="img" aria-labelledby="2026-11-02-chat-app-d2-t 2026-11-02-chat-app-d2-d">
+                <title id="2026-11-02-chat-app-d2-t">Final chat design</title>
+                <desc id="2026-11-02-chat-app-d2-d">A client talks to an API gateway. GET /connect goes to the connection service, which keeps the WebSocket open and registers the user in the presence cache. Sent messages pass to the message service, which numbers and saves them in the database, looks up the recipient's server in the cache and pushes through the connection service. GET /chats/{id}/messages goes to the history service, which reads pages from the database replica. Signs show the presence cache entries and the messages and chats tables.</desc>
+                <g class="d-node grass" style="--i:0"><rect x="2" y="230" width="62" height="60"/><text class="d-text" x="33" y="265" text-anchor="middle">Client</text></g>
+                <path class="d-edge" style="--i:1" d="M64 260H90"/><path class="d-arrow" style="--i:1" d="M84 254L92 260L84 266Z"/><path class="d-arrow" style="--i:1" d="M70 254L62 260L70 266Z"/>
+                <g class="d-node" style="--i:1"><rect x="90" y="20" width="90" height="520"/><text class="d-text" x="135" y="257" text-anchor="middle">API</text><text class="d-text" x="135" y="275" text-anchor="middle">gateway</text><text class="d-item" x="100" y="303">- one door</text><text class="d-item" x="100" y="323">- by path</text></g>
+                <path class="d-edge accent" style="--i:2" d="M180 70H290"/><path class="d-arrow accent" style="--i:2" d="M284 64L292 70L284 76Z"/><path class="d-arrow accent" style="--i:2" d="M186 64L178 70L186 76Z"/>
+                <text class="d-label" style="--i:2" x="235" y="40" text-anchor="middle">GET</text>
+                <text class="d-label" style="--i:2" x="235" y="54" text-anchor="middle">/connect</text>
+                <path class="d-edge" style="--i:2" d="M180 447H290"/><path class="d-arrow" style="--i:2" d="M284 441L292 447L284 453Z"/><path class="d-arrow" style="--i:2" d="M186 441L178 447L186 453Z"/>
+                <text class="d-label" style="--i:2" x="235" y="417" text-anchor="middle">GET /chats/</text>
+                <text class="d-label" style="--i:2" x="235" y="431" text-anchor="middle">{id}/messages</text>
+                <g class="d-node cmd" style="--i:3"><rect x="290" y="20" width="160" height="114"/><text class="d-text" x="370" y="46" text-anchor="middle">Connection</text><text class="d-item" x="302" y="72">- keep sockets open</text><text class="d-item" x="302" y="92">- pass sends on</text><text class="d-item" x="302" y="112">- push to the user</text></g>
+                <path class="d-edge accent" style="--i:4" d="M370 134V200"/><path class="d-arrow accent" style="--i:4" d="M364 194L370 202L376 194Z"/><path class="d-arrow accent" style="--i:4" d="M364 140L370 132L376 140Z"/>
+                <text class="d-label" style="--i:4" x="382" y="172">send / push to user</text>
+                <g class="d-node cmd" style="--i:5"><rect x="290" y="200" width="160" height="134"/><text class="d-text" x="370" y="226" text-anchor="middle">Message</text><text class="d-item" x="302" y="252">- number the message</text><text class="d-item" x="302" y="272">- save it first</text><text class="d-item" x="302" y="292">- find user's server</text><text class="d-item" x="302" y="312">- push, or skip if off</text></g>
+                <path class="d-edge" style="--i:6" d="M450 70H680V190"/><path class="d-arrow" style="--i:6" d="M674 184L680 192L686 184Z"/>
+                <text class="d-label" style="--i:6" x="462" y="60">register user</text>
+                <path class="d-edge" style="--i:6" d="M450 222H610"/><path class="d-arrow" style="--i:6" d="M604 216L612 222L604 228Z"/><path class="d-arrow" style="--i:6" d="M456 216L448 222L456 228Z"/>
+                <text class="d-label" style="--i:6" x="530" y="212" text-anchor="middle">find server</text>
+                <g class="d-node gem" style="--i:7"><rect x="610" y="190" width="140" height="64"/><text class="d-text" x="680" y="216" text-anchor="middle">Cache</text><text class="d-sub" x="680" y="236" text-anchor="middle">who is online</text></g>
+                <path class="d-line" style="--i:7" d="M680 254V270"/>
+                <g class="d-note" style="--i:7"><rect x="610" y="270" width="130" height="92"/><text class="d-note-t" x="620" y="290">presence</text><text class="d-mono" x="620" y="310">key  user_id</text><text class="d-mono" x="620" y="328">val  server</text><text class="d-mono" x="620" y="346">TTL  60 s</text></g>
+                <path class="d-edge accent" style="--i:8" d="M450 300H560V425H610"/><path class="d-arrow accent" style="--i:8" d="M604 419L612 425L604 431Z"/><path class="d-arrow accent" style="--i:8" d="M456 294L448 300L456 306Z"/>
+                <text class="d-label" style="--i:8" x="462" y="290">save msg</text>
+                <g class="d-node cmd" style="--i:9"><rect x="290" y="400" width="160" height="114"/><text class="d-text" x="370" y="426" text-anchor="middle">History</text><text class="d-item" x="302" y="452">- read a page by</text><text class="d-item" x="312" y="472">chat_id and seq</text><text class="d-item" x="302" y="492">- from the replica</text></g>
+                <path class="d-edge" style="--i:10" d="M450 465H610"/><path class="d-arrow" style="--i:10" d="M604 459L612 465L604 471Z"/><path class="d-arrow" style="--i:10" d="M456 459L448 465L456 471Z"/>
+                <text class="d-label" style="--i:10" x="530" y="455" text-anchor="middle">page of msgs</text>
+                <g class="d-node chest" style="--i:11"><rect x="610" y="410" width="140" height="100"/><text class="d-text" x="680" y="438" text-anchor="middle">Database</text><text class="d-sub" x="680" y="458" text-anchor="middle">primary + replica</text></g>
+                <path class="d-line" style="--i:11" d="M680 510V526"/>
+                <g class="d-note" style="--i:11"><rect x="560" y="526" width="190" height="160"/><text class="d-note-t" x="572" y="546">messages</text><text class="d-mono" x="572" y="566">chat_id, seq  PK</text><text class="d-mono" x="572" y="584">sender, text, time</text><text class="d-mono" x="572" y="602">client_msg_id  unique</text><text class="d-note-t" x="572" y="628">chats</text><text class="d-mono" x="572" y="648">chat_id  PK</text><text class="d-mono" x="572" y="666">user_a, user_b</text></g>
+                <rect class="d-packet" x="-6" y="-6" width="12" height="12" opacity="0"><animateMotion dur="8s" begin="1.6s" repeatCount="indefinite" keyPoints="0;1;1" keyTimes="0;.45;1" calcMode="linear" path="M64 260H135V70H370V300H560V425H610"/><animate attributeName="opacity" dur="8s" begin="1.6s" repeatCount="indefinite" values="0;1;1;0;0" keyTimes="0;.02;.43;.45;1"/></rect>
+                <rect class="d-packet alt" x="-6" y="-6" width="12" height="12" opacity="0"><animateMotion dur="8s" begin="1.6s" repeatCount="indefinite" keyPoints="0;0;1;1" keyTimes="0;.5;.95;1" calcMode="linear" path="M64 260H135V447H370V465H610"/><animate attributeName="opacity" dur="8s" begin="1.6s" repeatCount="indefinite" values="0;0;1;1;0;0" keyTimes="0;.5;.51;.94;.95;1"/></rect>
+              </svg>
+            </div>
+            <figcaption>The complete system. Gold = a message being sent and saved, cyan = a page of history being read. Signs show what each store holds.</figcaption>
+            <button class="replay" type="button" aria-label="Replay diagram animation">Replay</button>
+          </figure>
+
+          <div class="next reveal">
+            <h4>What you could add next</h4>
+            <ul class="next-list">
+              <li>Phone alerts for offline users, sent by workers reading a queue.</li>
+              <li>Split the messages table across databases by chat_id.</li>
+              <li>Group chats: push to every member's server.</li>
+            </ul>
+          </div>
+        </section>
+
+        <section class="sec reveal" id="2026-11-02-chat-app-sec-tips">
+          <h3>Interview tips</h3>
+          <dl class="qa">
+            <div><dt>What if Bob has two devices?</dt><dd>Store a list of servers per user in the cache and push to each one.</dd></div>
+            <div><dt>How do you know a connection is dead?</dt><dd>Pings stop, so the entry expires after 60 seconds.</dd></div>
+            <div><dt>How would groups work?</dt><dd>Same flow, but the message service looks up every member's server and pushes to each.</dd></div>
+          </dl>
+          <h4>Common mistakes</h4>
+          <ul class="mistakes">
+            <li>Pushing a message before it is saved.</li>
+            <li>Ordering messages by phone timestamps.</li>
+          </ul>
+          <aside class="callout tip">
+            <span class="callout-label">Interview tip</span>
+            <p>Say "save first, then push" out loud.</p>
+          </aside>
+          <aside class="callout confidence">
+            <span class="callout-label">Confidence note</span>
+            <p>The traffic numbers, 50,000 connections per server, the 20 s ping, the 60 s TTL and the 2,000-character limit are assumptions. A wide-column store keyed by chat_id is an equally valid home for messages.</p>
+          </aside>
+        </section>
+
+        <p class="sources">Sources: Alex Xu, <em>System Design Interview</em> (Vol. 1), "Design a chat system"; Hello Interview, <a href="https://www.hellointerview.com/learn/system-design/problem-breakdowns/whatsapp">WhatsApp breakdown</a>; MDN, <a href="https://developer.mozilla.org/en-US/docs/Web/API/WebSockets_API">WebSockets API</a>.</p>
+      </div>
+    </article>
     <article class="entry" id="2026-11-01-search-autocomplete" data-topic="Search autocomplete" data-domain="Search" data-date="2026-11-01" data-level="2">
       <header class="entry-head">
         <div class="entry-meta">
