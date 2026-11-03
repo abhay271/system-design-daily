@@ -420,6 +420,7 @@ dfn.term{font-style:normal;border-bottom:2px dotted var(--accent);cursor:help}
       <h2><svg viewBox="0 0 12 12" aria-hidden="true"><path fill="#7A4A2A" d="M0 2h12v9H0z"/><path fill="#A86A3C" d="M1 3h10v3H1zM1 7h10v3H1z"/><path fill="#E9B526" d="M5 5h2v3H5z"/><path fill="#4A2C18" d="M0 6h5v1H0zM7 6h5v1H7z"/></svg>Archive</h2>
       <ol class="toc">
         <!-- TOC -->
+        <li><a href="#2026-11-03-news-feed"><time datetime="2026-11-03">2026-11-03</time><span>News feed: copy posts early, merge the famous late</span></a></li>
         <li><a href="#2026-11-02-chat-app"><time datetime="2026-11-02">2026-11-02</time><span>Chat app: save first, then deliver</span></a></li>
         <li><a href="#2026-11-01-search-autocomplete"><time datetime="2026-11-01">2026-11-01</time><span>Search autocomplete: answers ready before you finish typing</span></a></li>
         <li><a href="#2026-10-31-leaderboard"><time datetime="2026-10-31">2026-10-31</time><span>Leaderboard: ranking millions without sorting them</span></a></li>
@@ -434,6 +435,290 @@ dfn.term{font-style:normal;border-bottom:2px dotted var(--accent);cursor:help}
 
   <main id="entries" tabindex="-1">
     <!-- ENTRIES -->
+    <article class="entry" id="2026-11-03-news-feed" data-topic="News feed" data-domain="Feeds" data-date="2026-11-03" data-level="2">
+      <header class="entry-head">
+        <div class="entry-meta">
+          <span class="chip">Feeds</span>
+          <span class="level" title="Difficulty: level 2 of 3">Lv 2</span>
+          <time datetime="2026-11-03">3 Nov 2026</time>
+          <span class="read"><span class="read-time">4</span> min read</span>
+        </div>
+        <h2 class="entry-title">Design a news feed</h2>
+        <p class="lede">You follow 300 people. You open the app and instantly see their latest posts, newest first. Every user sees a different list, and it is read far more often than it changes.</p>
+        <nav class="steps" aria-label="Sections of this design">
+          <a href="#2026-11-03-news-feed-sec-functional">Features</a>
+          <a href="#2026-11-03-news-feed-sec-nonfunctional">Qualities</a>
+          <a href="#2026-11-03-news-feed-sec-entities">Entities</a>
+          <a href="#2026-11-03-news-feed-sec-api">API</a>
+          <a href="#2026-11-03-news-feed-sec-hld">Design</a>
+          <a href="#2026-11-03-news-feed-sec-deepdives">Deep dives</a>
+          <a href="#2026-11-03-news-feed-sec-tips">Tips</a>
+        </nav>
+      </header>
+
+      <div class="prose">
+        <details class="legend">
+          <summary>Legend <span class="hint">6 terms used below</span></summary>
+          <dl>
+            <div><dt>Fan-out</dt><dd>Copying one new post into many followers' feeds. "On read" means we gather posts when someone opens the feed. "On write" means we copy them when the post is made.</dd></div>
+            <div><dt>Cache</dt><dd>A fast store, usually in memory, that holds data that is ready to use.</dd></div>
+            <div><dt>Queue</dt><dd>A waiting line of tasks. The sender drops a task in and moves on.</dd></div>
+            <div><dt>Worker</dt><dd>A background program that takes tasks off a queue and does them.</dd></div>
+            <div><dt>API gateway</dt><dd>The single front door of a system. It receives every request and sends each one to the right service.</dd></div>
+            <div><dt>Replica</dt><dd>A copy of a database that is kept up to date. It takes over if the main copy (the primary) dies.</dd></div>
+          </dl>
+        </details>
+
+        <section class="sec reveal" id="2026-11-03-news-feed-sec-functional">
+          <h3>Functional requirements</h3>
+          <ul class="reqs">
+            <li>Publish a short text post.</li>
+            <li>Follow another user.</li>
+            <li>See a feed: the newest posts from people I follow, with older ones as I scroll.</li>
+          </ul>
+          <p class="out">Out of scope: likes, comments, images, unfollow, "recommended for you" ranking, ads.</p>
+        </section>
+
+        <section class="sec reveal" id="2026-11-03-news-feed-sec-nonfunctional">
+          <h3>Non-functional requirements</h3>
+          <ul class="reqs nfr">
+            <li><strong>Fast feed.</strong></li>
+            <li><strong>Fresh enough.</strong> A post may take a few seconds to show up.</li>
+            <li><strong>No lost posts.</strong> Once the app says "posted", the post must survive a crash.</li>
+            <li><strong>Huge accounts.</strong> One user with 10 million followers must not slow everyone else.</li>
+          </ul>
+        </section>
+
+        <section class="sec reveal" id="2026-11-03-news-feed-sec-entities">
+          <h3>Core entities</h3>
+          <ul class="entities">
+            <li><strong>User:</strong> a person, with a count of their followers.</li>
+            <li><strong>Post:</strong> author, text, and time.</li>
+            <li><strong>Follow:</strong> who follows whom.</li>
+          </ul>
+        </section>
+
+        <section class="sec reveal" id="2026-11-03-news-feed-sec-api">
+          <h3>API design</h3>
+          <div class="api-list">
+            <div class="api">
+              <div class="api-sig"><span class="method">POST</span><code>/posts</code></div>
+              <p>Text over 280 characters gets 400.</p>
+              <div class="io">
+                <div><span class="io-l">Request body</span><pre>{ "text": "Hello world" }</pre></div>
+                <div><span class="io-l">Response 201 Created</span><pre>{
+  "post_id": "8841",
+  "created_at": "2026-11-03T09:30:00Z"
+}</pre></div>
+              </div>
+            </div>
+            <div class="api">
+              <div class="api-sig"><span class="method">POST</span><code>/follows</code></div>
+              <p>Following the same person twice is harmless and returns 200 OK.</p>
+              <div class="io">
+                <div><span class="io-l">Request body</span><pre>{ "followee_id": "u77" }</pre></div>
+                <div><span class="io-l">Response 201 Created</span><pre>{ "followee_id": "u77" }</pre></div>
+              </div>
+            </div>
+            <div class="api">
+              <div class="api-sig"><span class="method get">GET</span><code>/feed?limit=20&amp;cursor=8841</code></div>
+              <p>One page older than the cursor, newest first.</p>
+              <div class="io">
+                <div><span class="io-l">Request body</span><pre>(none)</pre></div>
+                <div><span class="io-l">Response 200 OK</span><pre>{
+  "posts": [
+    { "post_id": "8830", "author": "u77",
+      "text": "Hello world" }
+  ],
+  "next_cursor": "8811"
+}</pre></div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="sec" id="2026-11-03-news-feed-sec-hld">
+          <h3>High-level design</h3>
+          <div class="reveal">
+            <p>Assume 10 million people open the app 10 times a day. That is 100 million feed loads a day, about 1,150 a second (100M / 86,400). If each person posts once every 5 days, that is 2 million posts a day, about 23 a second. Reads outnumber writes about 50 to 1, so the design must make reads cheap. Identical app servers keep no data, behind a load balancer.</p>
+            <h4>1. Publishing a post</h4>
+            <p>The server gives the post an id and saves a row. Ids are time-sortable (Snowflake-style: clock plus a small counter), so a bigger id is a newer post.</p>
+            <h4>2. Following someone</h4>
+            <p>Save one row: who follows whom. An index on followee_id lets us list a user's followers quickly.</p>
+            <h4>3. Reading the feed</h4>
+            <p>Simplest is <dfn class="term" title="Gathering posts when someone opens the feed, instead of copying them earlier.">fan-out on read</dfn>. Look up who I follow, fetch each one's latest posts, merge them and keep the newest 20.</p>
+            <div class="table-scroll">
+              <table class="schema">
+                <caption>Table: posts</caption>
+                <thead><tr><th>Column</th><th>Type</th><th>Note</th></tr></thead>
+                <tbody>
+                  <tr><td>post_id</td><td>integer</td><td>primary key, time-sortable</td></tr>
+                  <tr><td>author_id</td><td>text</td><td>index (author_id, post_id) for "latest posts by one person"</td></tr>
+                  <tr><td>text</td><td>text</td><td>up to 280 characters</td></tr>
+                  <tr><td>created_at</td><td>timestamp</td><td>shown in the app</td></tr>
+                </tbody>
+              </table>
+            </div>
+            <div class="table-scroll">
+              <table class="schema">
+                <caption>Table: follows</caption>
+                <thead><tr><th>Column</th><th>Type</th><th>Note</th></tr></thead>
+                <tbody>
+                  <tr><td>follower_id, followee_id</td><td>text, text</td><td>primary key, answers "who do I follow?"</td></tr>
+                  <tr><td>followee_id</td><td>text</td><td>second index, answers "who follows them?"</td></tr>
+                </tbody>
+              </table>
+            </div>
+            <div class="table-scroll">
+              <table class="schema">
+                <caption>Table: users</caption>
+                <thead><tr><th>Column</th><th>Type</th><th>Note</th></tr></thead>
+                <tbody>
+                  <tr><td>user_id</td><td>text</td><td>primary key</td></tr>
+                  <tr><td>follower_count</td><td>integer</td><td>updated when someone follows</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <figure class="diagram-fig">
+            <div class="diagram-scroll" tabindex="0" role="group" aria-label="Diagram: simple news feed architecture. Scrollable on small screens.">
+              <svg class="diagram" viewBox="0 0 760 340" role="img" aria-labelledby="2026-11-03-news-feed-d1-t 2026-11-03-news-feed-d1-d">
+                <title id="2026-11-03-news-feed-d1-t">Simple news feed architecture</title>
+                <desc id="2026-11-03-news-feed-d1-d">A client sends posts, follows and feed requests to app servers. The app servers save and read rows in one database. A sign beside the database shows the posts and follows tables.</desc>
+                <g class="d-node grass" style="--i:0"><rect x="2" y="100" width="80" height="60"/><text class="d-text" x="42" y="135" text-anchor="middle">Client</text></g>
+                <path class="d-edge accent" style="--i:1" d="M82 130H190"/><path class="d-arrow accent" style="--i:1" d="M184 124L192 130L184 136Z"/><path class="d-arrow accent" style="--i:1" d="M88 124L80 130L88 136Z"/>
+                <text class="d-label" style="--i:1" x="136" y="120" text-anchor="middle">request</text>
+                <g class="d-node cmd" style="--i:2"><rect x="190" y="70" width="190" height="120"/><text class="d-text" x="285" y="96" text-anchor="middle">App servers</text><text class="d-item" x="202" y="122">- save posts, follows</text><text class="d-item" x="202" y="142">- list who I follow</text><text class="d-item" x="202" y="162">- merge their posts</text></g>
+                <path class="d-edge accent" style="--i:3" d="M380 130H540"/><path class="d-arrow accent" style="--i:3" d="M534 124L542 130L534 136Z"/><path class="d-arrow accent" style="--i:3" d="M386 124L378 130L386 136Z"/>
+                <text class="d-label" style="--i:3" x="460" y="120" text-anchor="middle">save / read</text>
+                <g class="d-node chest" style="--i:4"><rect x="540" y="90" width="200" height="80"/><text class="d-text" x="640" y="124" text-anchor="middle">Database</text><text class="d-sub" x="640" y="146" text-anchor="middle">one primary</text></g>
+                <path class="d-line" style="--i:4" d="M640 170V186"/>
+                <g class="d-note" style="--i:4"><rect x="540" y="186" width="200" height="140"/><text class="d-note-t" x="552" y="206">posts</text><text class="d-mono" x="552" y="226">post_id  PK, author_id</text><text class="d-mono" x="552" y="244">text, created_at</text><text class="d-note-t" x="552" y="270">follows</text><text class="d-mono" x="552" y="290">(follower, followee) PK</text><text class="d-mono" x="552" y="308">index followee_id</text></g>
+                <rect class="d-packet" x="-6" y="-6" width="12" height="12" opacity="0"><animateMotion dur="8s" begin="1.4s" repeatCount="indefinite" keyPoints="0;1;1" keyTimes="0;.4;1" calcMode="linear" path="M82 130H540"/><animate attributeName="opacity" dur="8s" begin="1.4s" repeatCount="indefinite" values="0;1;1;0;0" keyTimes="0;.02;.38;.4;1"/></rect>
+              </svg>
+            </div>
+            <figcaption>The starting point: app servers do everything and one database holds every post and follow. Gold = a request travelling to the database.</figcaption>
+            <button class="replay" type="button" aria-label="Replay diagram animation">Replay</button>
+          </figure>
+
+          <aside class="callout why reveal">
+            <span class="callout-label">Why</span>
+            <p><strong>Why sort and page by post_id, not by time?</strong> Two posts can share a millisecond, but never an id, so "older than 8841" is an exact cursor.</p>
+          </aside>
+        </section>
+
+        <section class="sec" id="2026-11-03-news-feed-sec-deepdives">
+          <h3>Deep dives</h3>
+          <div class="dive reveal">
+            <h4>How do we make the feed load fast?</h4>
+            <p>Building on read costs one lookup per person followed: 300 followed at 1,150 loads a second is about 345,000 lookups a second.</p>
+            <ol class="options">
+              <li><strong>Build on read.</strong> Fresh and simple, but hundreds of lookups per load.</li>
+              <li><strong>Save each finished feed for a minute.</strong> Repeat opens are fast, but the first is still slow.</li>
+              <li class="pick"><strong>Build on write.</strong><span class="pick-tag">Pick</span> Copy each new post's id into every follower's ready-made list. Opening the feed is one lookup.</li>
+            </ol>
+            <p>The copying costs little: 23 posts a second times about 200 followers is roughly 4,600 list updates a second. The write service saves the post, then drops a task on a <dfn class="term" title="A waiting line of tasks. The sender adds one and moves on.">queue</dfn>. <dfn class="term" title="A background program that takes tasks off a queue and does them.">Workers</dfn> read the author's followers and add the post id to each follower's list in a <dfn class="term" title="A fast in-memory store for data that is ready to use.">cache</dfn>.</p>
+            <p>The cache maps user_id to a list of the newest 500 post ids. The feed service reads that list, then loads the posts by id. If the list is missing (a new or idle user), it builds one the slow way and stores it. Lists untouched for 30 days expire. A task that runs twice is harmless, since the list skips ids it holds. If the cache is lost, feeds rebuild on demand. If the queue falls behind, feeds are late, not wrong.</p>
+          </div>
+
+          <div class="dive reveal">
+            <h4>What about accounts with millions of followers?</h4>
+            <p>One post from a 10-million-follower account means 10 million list updates.</p>
+            <ol class="options">
+              <li><strong>Copy to everyone.</strong> Simple, but one post clogs the queue for minutes.</li>
+              <li class="pick"><strong>Copy for ordinary accounts, merge for big ones.</strong><span class="pick-tag">Pick</span> Skip the copy for accounts over 100,000 followers (an assumed cut-off). When a feed is loaded, also fetch the latest posts of the few big accounts that user follows, and merge them by post_id.</li>
+            </ol>
+            <p>The worker checks follower_count before copying. Most people follow only a few big accounts, so the extra work on read is small.</p>
+          </div>
+
+          <div class="reveal">
+            <h4>Final design</h4>
+            <p>The dives added a queue, fan-out workers, a feed cache and the big-account rule. The <dfn class="term" title="The single front door that sends each request to the right service.">API gateway</dfn> splits traffic by job: posts are rare, feed loads constant, and a fan-out burst must never slow a feed load.</p>
+            <p>A post is saved on the primary before the app says "posted". Feed reads use a <dfn class="term" title="A kept-up-to-date copy of a database that takes over if the main one dies.">replica</dfn>, which may be a moment behind. That is fine for a feed. If the primary dies, the replica takes over.</p>
+          </div>
+
+          <figure class="diagram-fig" id="2026-11-03-news-feed-final">
+            <div class="diagram-scroll" tabindex="0" role="group" aria-label="Diagram: the final news feed design. Scrollable on small screens.">
+              <svg class="diagram" viewBox="0 0 760 890" role="img" aria-labelledby="2026-11-03-news-feed-d2-t 2026-11-03-news-feed-d2-d">
+                <title id="2026-11-03-news-feed-d2-t">Final news feed design</title>
+                <desc id="2026-11-03-news-feed-d2-d">A client talks to an API gateway. POST /posts and POST /follows go to the write service, which makes a sortable id, saves the row in the database and puts a fan-out task on a queue. A fan-out worker takes the task, reads the author's followers from the database and adds the post id to each follower's list in the feed cache. GET /feed goes to the feed service, which checks the feed cache first, adds the latest posts of big accounts, and loads the posts from the database replica. Signs show the queue message, the cache list and the posts, follows and users tables.</desc>
+                <g class="d-node grass" style="--i:0"><rect x="2" y="300" width="62" height="60"/><text class="d-text" x="33" y="335" text-anchor="middle">Client</text></g>
+                <path class="d-edge" style="--i:1" d="M64 330H90"/><path class="d-arrow" style="--i:1" d="M84 324L92 330L84 336Z"/><path class="d-arrow" style="--i:1" d="M70 324L62 330L70 336Z"/>
+                <g class="d-node" style="--i:1"><rect x="90" y="20" width="90" height="620"/><text class="d-text" x="135" y="327" text-anchor="middle">API</text><text class="d-text" x="135" y="345" text-anchor="middle">gateway</text><text class="d-item" x="100" y="373">- one door</text><text class="d-item" x="100" y="393">- by path</text></g>
+                <path class="d-edge accent" style="--i:2" d="M180 77H290"/><path class="d-arrow accent" style="--i:2" d="M284 71L292 77L284 83Z"/><path class="d-arrow accent" style="--i:2" d="M186 71L178 77L186 83Z"/>
+                <text class="d-label" style="--i:2" x="235" y="45" text-anchor="middle">POST /posts</text>
+                <text class="d-label" style="--i:2" x="235" y="59" text-anchor="middle">POST /follows</text>
+                <path class="d-edge accent" style="--i:2" d="M180 565H290"/><path class="d-arrow accent" style="--i:2" d="M284 559L292 565L284 571Z"/><path class="d-arrow accent" style="--i:2" d="M186 559L178 565L186 571Z"/>
+                <text class="d-label" style="--i:2" x="235" y="555" text-anchor="middle">GET /feed</text>
+                <g class="d-node cmd" style="--i:3"><rect x="290" y="20" width="160" height="114"/><text class="d-text" x="370" y="46" text-anchor="middle">Write</text><text class="d-item" x="302" y="72">- make a sortable id</text><text class="d-item" x="302" y="92">- save post or follow</text><text class="d-item" x="302" y="112">- queue the fan-out</text></g>
+                <path class="d-edge accent" style="--i:4" d="M450 77H640"/><path class="d-arrow accent" style="--i:4" d="M634 71L642 77L634 83Z"/>
+                <text class="d-label" style="--i:4" x="545" y="67" text-anchor="middle">save row</text>
+                <path class="d-edge" style="--i:4" d="M370 134V164"/><path class="d-arrow" style="--i:4" d="M364 158L370 166L376 158Z"/>
+                <text class="d-label" style="--i:4" x="382" y="154">new post id</text>
+                <g class="d-node furnace" style="--i:5"><rect x="290" y="164" width="160" height="56"/><text class="d-text" x="370" y="190" text-anchor="middle">Queue</text><text class="d-sub" x="370" y="208" text-anchor="middle">fan-out tasks</text></g>
+                <path class="d-line" style="--i:5" d="M450 192H470"/>
+                <g class="d-note" style="--i:5"><rect x="470" y="156" width="160" height="76"/><text class="d-note-t" x="482" y="176">task message</text><text class="d-mono" x="482" y="196">post_id</text><text class="d-mono" x="482" y="214">author_id</text></g>
+                <path class="d-edge" style="--i:6" d="M370 220V250"/><path class="d-arrow" style="--i:6" d="M364 244L370 252L376 244Z"/>
+                <text class="d-label" style="--i:6" x="382" y="241">to fan out</text>
+                <g class="d-node furnace" style="--i:6"><rect x="290" y="250" width="160" height="114"/><text class="d-text" x="370" y="276" text-anchor="middle">Fan-out</text><text class="d-item" x="302" y="302">- list the followers</text><text class="d-item" x="302" y="322">- skip big accounts</text><text class="d-item" x="302" y="342">- add id to feeds</text></g>
+                <path class="d-edge" style="--i:7" d="M450 300H640"/><path class="d-arrow" style="--i:7" d="M634 294L642 300L634 306Z"/><path class="d-arrow" style="--i:7" d="M456 294L448 300L456 306Z"/>
+                <text class="d-label" style="--i:7" x="545" y="290" text-anchor="middle">who follows</text>
+                <path class="d-edge" style="--i:8" d="M370 364V394"/><path class="d-arrow" style="--i:8" d="M364 388L370 396L376 388Z"/>
+                <text class="d-label" style="--i:8" x="382" y="384">add post id</text>
+                <g class="d-node gem" style="--i:8"><rect x="290" y="394" width="160" height="64"/><text class="d-text" x="370" y="420" text-anchor="middle">Feed cache</text><text class="d-sub" x="370" y="440" text-anchor="middle">Redis, in memory</text></g>
+                <path class="d-line" style="--i:8" d="M450 426H470"/>
+                <g class="d-note" style="--i:8"><rect x="470" y="380" width="160" height="96"/><text class="d-note-t" x="482" y="400">feed list</text><text class="d-mono" x="482" y="420">key  user_id</text><text class="d-mono" x="482" y="438">val  post ids</text><text class="d-mono" x="482" y="456">newest 500</text></g>
+                <path class="d-edge accent" style="--i:9" d="M370 458V498"/><path class="d-arrow accent" style="--i:9" d="M364 464L370 456L376 464Z"/><path class="d-arrow accent" style="--i:9" d="M364 492L370 500L376 492Z"/>
+                <text class="d-label" style="--i:9" x="382" y="482">check first</text>
+                <g class="d-node cmd" style="--i:9"><rect x="290" y="498" width="160" height="134"/><text class="d-text" x="370" y="524" text-anchor="middle">Feed</text><text class="d-item" x="302" y="550">- read my id list</text><text class="d-item" x="302" y="570">- rebuild if empty</text><text class="d-item" x="302" y="590">- add big accounts</text><text class="d-item" x="302" y="610">- load the posts</text></g>
+                <path class="d-edge" style="--i:10" d="M450 565H640"/><path class="d-arrow" style="--i:10" d="M634 559L642 565L634 571Z"/><path class="d-arrow" style="--i:10" d="M456 559L448 565L456 571Z"/>
+                <text class="d-label" style="--i:10" x="545" y="555" text-anchor="middle">load posts</text>
+                <g class="d-node chest" style="--i:11"><rect x="640" y="20" width="110" height="620"/><text class="d-text" x="695" y="330" text-anchor="middle">Database</text><text class="d-sub" x="695" y="352" text-anchor="middle">primary +</text><text class="d-sub" x="695" y="368" text-anchor="middle">replica</text></g>
+                <path class="d-line" style="--i:11" d="M695 640V656"/>
+                <g class="d-note" style="--i:11"><rect x="540" y="656" width="210" height="214"/><text class="d-note-t" x="552" y="676">posts</text><text class="d-mono" x="552" y="696">post_id  PK</text><text class="d-mono" x="552" y="714">author_id, text</text><text class="d-mono" x="552" y="732">index author_id</text><text class="d-note-t" x="552" y="758">follows</text><text class="d-mono" x="552" y="778">(follower, followee) PK</text><text class="d-mono" x="552" y="796">index followee_id</text><text class="d-note-t" x="552" y="822">users</text><text class="d-mono" x="552" y="842">user_id  PK</text><text class="d-mono" x="552" y="860">follower_count</text></g>
+                <rect class="d-packet" x="-6" y="-6" width="12" height="12" opacity="0"><animateMotion dur="8s" begin="1.6s" repeatCount="indefinite" keyPoints="0;1;1" keyTimes="0;.4;1" calcMode="linear" path="M64 330H135V77H640"/><animate attributeName="opacity" dur="8s" begin="1.6s" repeatCount="indefinite" values="0;1;1;0;0" keyTimes="0;.02;.38;.4;1"/></rect>
+                <rect class="d-packet alt" x="-6" y="-6" width="12" height="12" opacity="0"><animateMotion dur="8s" begin="1.6s" repeatCount="indefinite" keyPoints="0;0;1;1" keyTimes="0;.5;.95;1" calcMode="linear" path="M64 330H135V565H370V458"/><animate attributeName="opacity" dur="8s" begin="1.6s" repeatCount="indefinite" values="0;0;1;1;0;0" keyTimes="0;.5;.51;.94;.95;1"/></rect>
+              </svg>
+            </div>
+            <figcaption>The complete system. Gold = a post being saved, cyan = a feed being read. Signs show what each store holds.</figcaption>
+            <button class="replay" type="button" aria-label="Replay diagram animation">Replay</button>
+          </figure>
+
+          <div class="next reveal">
+            <h4>What you could add next</h4>
+            <ul class="next-list">
+              <li>Images and video: blob storage plus a CDN, with only links in the posts table.</li>
+                            <li>Split posts across databases by author_id.</li>
+            </ul>
+          </div>
+        </section>
+
+        <section class="sec reveal" id="2026-11-03-news-feed-sec-tips">
+          <h3>Interview tips</h3>
+          <dl class="qa">
+            <div><dt>What if someone deletes a post?</dt><dd>Mark the row deleted. The feed service skips deleted posts when it loads them by id.</dd></div>
+            <div><dt>What happens when I unfollow someone?</dt><dd>Their new posts stop arriving, and old ones fall out of my list as newer ones push them down.</dd></div>
+                        <div><dt>How would the feed cache scale?</dt><dd>Spread lists over cache servers by user_id.</dd></div>
+          </dl>
+          <h4>Common mistakes</h4>
+          <ul class="mistakes">
+            <li>Copying posts to followers inside the post request, so posting waits on thousands of writes.</li>
+            <li>Forgetting accounts with millions of followers.</li>
+          </ul>
+          <aside class="callout tip">
+            <span class="callout-label">Interview tip</span>
+            <p>Name both approaches, fan-out on read and on write, then say which one the 50-to-1 read ratio favours.</p>
+          </aside>
+          <aside class="callout confidence">
+            <span class="callout-label">Confidence note</span>
+            <p>The traffic numbers, 200 average followers, the 100,000 cut-off, 500 ids per list and the 30-day expiry are assumptions. Pure fan-out on read or on write is defensible for smaller systems.</p>
+          </aside>
+        </section>
+
+        <p class="sources">Sources: Hello Interview, <a href="https://www.hellointerview.com/learn/system-design/problem-breakdowns/fb-news-feed">News feed breakdown</a>; Alex Xu, <em>System Design Interview</em> (Vol. 1), "Design a news feed system"; Redis docs, <a href="https://redis.io/docs/latest/develop/data-types/lists/">Lists</a>.</p>
+      </div>
+    </article>
     <article class="entry" id="2026-11-02-chat-app" data-topic="Chat app" data-domain="Real-time messaging" data-date="2026-11-02" data-level="2">
       <header class="entry-head">
         <div class="entry-meta">
