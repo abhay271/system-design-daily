@@ -420,6 +420,7 @@ dfn.term{font-style:normal;border-bottom:2px dotted var(--accent);cursor:help}
       <h2><svg viewBox="0 0 12 12" aria-hidden="true"><path fill="#7A4A2A" d="M0 2h12v9H0z"/><path fill="#A86A3C" d="M1 3h10v3H1zM1 7h10v3H1z"/><path fill="#E9B526" d="M5 5h2v3H5z"/><path fill="#4A2C18" d="M0 6h5v1H0zM7 6h5v1H7z"/></svg>Archive</h2>
       <ol class="toc">
         <!-- TOC -->
+        <li><a href="#2026-11-05-ad-click-counter"><time datetime="2026-11-05">2026-11-05</time><span>Ad click counter: count every click once, even in a rush</span></a></li>
         <li><a href="#2026-11-04-nearby-places"><time datetime="2026-11-04">2026-11-04</time><span>Nearby places: boxes on a map beat measuring everything</span></a></li>
         <li><a href="#2026-11-03-news-feed"><time datetime="2026-11-03">2026-11-03</time><span>News feed: copy posts early, merge the famous late</span></a></li>
         <li><a href="#2026-11-02-chat-app"><time datetime="2026-11-02">2026-11-02</time><span>Chat app: save first, then deliver</span></a></li>
@@ -436,6 +437,261 @@ dfn.term{font-style:normal;border-bottom:2px dotted var(--accent);cursor:help}
 
   <main id="entries" tabindex="-1">
     <!-- ENTRIES -->
+    <article class="entry" id="2026-11-05-ad-click-counter" data-topic="Ad click counter" data-domain="Write-heavy logging" data-date="2026-11-05" data-level="2">
+      <header class="entry-head">
+        <div class="entry-meta">
+          <span class="chip">Write-heavy logging</span>
+          <span class="level" title="Difficulty: level 2 of 3">Lv 2</span>
+          <time datetime="2026-11-05">5 Nov 2026</time>
+          <span class="read"><span class="read-time">4</span> min read</span>
+        </div>
+        <h2 class="entry-title">Design an ad click counter</h2>
+        <p class="lede">You tap an ad and land on the shop's page. The advertiser pays per click, so a counter must go up exactly once for your tap. Thousands of people tap at the same moment, and no click may be lost or counted twice.</p>
+        <nav class="steps" aria-label="Sections of this design">
+          <a href="#2026-11-05-ad-click-counter-sec-functional">Features</a>
+          <a href="#2026-11-05-ad-click-counter-sec-nonfunctional">Qualities</a>
+          <a href="#2026-11-05-ad-click-counter-sec-entities">Entities</a>
+          <a href="#2026-11-05-ad-click-counter-sec-api">API</a>
+          <a href="#2026-11-05-ad-click-counter-sec-hld">Design</a>
+          <a href="#2026-11-05-ad-click-counter-sec-deepdives">Deep dives</a>
+          <a href="#2026-11-05-ad-click-counter-sec-tips">Tips</a>
+        </nav>
+      </header>
+
+      <div class="prose">
+        <details class="legend">
+          <summary>Legend <span class="hint">7 terms used below</span></summary>
+          <dl>
+            <div><dt>Queue</dt><dd>A line of messages waiting to be handled, in order. The sender drops a message in and moves on without waiting.</dd></div>
+            <div><dt>Worker</dt><dd>A background program that takes messages from a queue and does the work.</dd></div>
+            <div><dt>Transaction</dt><dd>A group of database changes that either all happen or none do.</dd></div>
+            <div><dt>Cache</dt><dd>A fast store, usually in memory, that holds data that is ready to use.</dd></div>
+            <div><dt>TTL</dt><dd>"Time to live": how long a cached entry is kept before it is thrown away.</dd></div>
+            <div><dt>Replica</dt><dd>A copy of a database that is kept up to date. It takes over if the main copy (the primary) dies.</dd></div>
+            <div><dt>API gateway</dt><dd>The single front door of a system. It receives every request and sends each one to the right service.</dd></div>
+          </dl>
+        </details>
+
+        <section class="sec reveal" id="2026-11-05-ad-click-counter-sec-functional">
+          <h3>Functional requirements</h3>
+          <ul class="reqs">
+            <li>Click an ad: send the user to the advertiser's page and count the click.</li>
+            <li>Show an advertiser the clicks on an ad, per minute, over a time range.</li>
+          </ul>
+          <p class="out">Out of scope: choosing ads, fraud detection, billing.</p>
+        </section>
+
+        <section class="sec reveal" id="2026-11-05-ad-click-counter-sec-nonfunctional">
+          <h3>Non-functional requirements</h3>
+          <ul class="reqs nfr">
+            <li><strong>Fast redirect.</strong> The user is waiting, so counting must not slow the page.</li>
+            <li><strong>Heavy writes.</strong> Every click is a write, and a popular ad gets thousands at once.</li>
+            <li><strong>Accurate.</strong> Clicks are money: none lost, none counted twice.</li>
+            <li><strong>Fresh enough.</strong> A minute behind is fine.</li>
+          </ul>
+        </section>
+
+        <section class="sec reveal" id="2026-11-05-ad-click-counter-sec-entities">
+          <h3>Core entities</h3>
+          <ul class="entities">
+            <li><strong>Ad:</strong> an id and its landing page.</li>
+            <li><strong>Click:</strong> a click id, the ad and the time. It is counted, then forgotten.</li>
+            <li><strong>Count:</strong> the number of clicks for one ad in one minute.</li>
+          </ul>
+        </section>
+
+        <section class="sec reveal" id="2026-11-05-ad-click-counter-sec-api">
+          <h3>API design</h3>
+          <div class="api-list">
+            <div class="api">
+              <div class="api-sig"><span class="method get">GET</span><code>/ads/{ad_id}/click?click_id=c_91f2</code></div>
+              <p>Every link carries a fresh click_id from the ad server, so a retry reuses it. 302 Found, not 301: browsers may remember a 301 and skip us. Unknown ad: 404.</p>
+              <div class="io">
+                <div><span class="io-l">Request body</span><pre>(none)</pre></div>
+                <div><span class="io-l">Response 302 Found</span><pre>Location: https://shop.example/sale</pre></div>
+              </div>
+            </div>
+            <div class="api">
+              <div class="api-sig"><span class="method get">GET</span><code>/ads/{ad_id}/stats?from=2026-11-05T09:00Z&amp;to=2026-11-05T10:00Z&amp;limit=60&amp;cursor=09:30</code></div>
+              <p>The advertiser comes from the auth token. Someone else's ad gets 403; a range over 24 hours gets 400.</p>
+              <div class="io">
+                <div><span class="io-l">Request body</span><pre>(none)</pre></div>
+                <div><span class="io-l">Response 200 OK</span><pre>{
+  "counts": [
+    { "minute": "09:00", "clicks": 412 }
+  ],
+  "next_cursor": "09:30"
+}</pre></div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="sec" id="2026-11-05-ad-click-counter-sec-hld">
+          <h3>High-level design</h3>
+          <div class="reveal">
+            <p>Assume 100 million clicks a day. That is about 1,200 a second (100M / 86,400), and we plan for peaks of 5 times that, about 6,000 a second. Dashboard reads are rare. Identical app servers keep no data, behind a load balancer.</p>
+            <h4>1. Counting a click</h4>
+            <p>Look up the ad's landing URL in the ads table (ad_id, landing_url). Add 1 to this ad's row for this minute, then reply 302.</p>
+            <h4>2. Showing counts</h4>
+            <p>Read the rows for one ad between two minutes. The primary key (ad_id, minute) makes this one fast range read.</p>
+            <div class="table-scroll">
+              <table class="schema">
+                <caption>Table: counts</caption>
+                <thead><tr><th>Column</th><th>Type</th><th>Note</th></tr></thead>
+                <tbody>
+                  <tr><td>ad_id</td><td>text</td><td>primary key, part 1</td></tr>
+                  <tr><td>minute</td><td>timestamp</td><td>primary key, part 2; the minute the click happened</td></tr>
+                  <tr><td>n</td><td>integer</td><td>clicks counted in that minute</td></tr>
+                </tbody>
+              </table>
+            </div>
+            <p>But a viral ad piles thousands of updates onto one row, and every redirect waits for the database.</p>
+          </div>
+
+          <figure class="diagram-fig">
+            <div class="diagram-scroll" tabindex="0" role="group" aria-label="Diagram: simple ad click counter architecture. Scrollable on small screens.">
+              <svg class="diagram" viewBox="0 0 760 340" role="img" aria-labelledby="2026-11-05-ad-click-counter-d1-t 2026-11-05-ad-click-counter-d1-d">
+                <title id="2026-11-05-ad-click-counter-d1-t">Simple ad click counter architecture</title>
+                <desc id="2026-11-05-ad-click-counter-d1-d">A client sends a click to app servers. The app servers add 1 to a count row in one database and reply with a redirect. A sign beside the database shows the counts table.</desc>
+                <g class="d-node grass" style="--i:0"><rect x="2" y="100" width="80" height="60"/><text class="d-text" x="42" y="135" text-anchor="middle">Client</text></g>
+                <path class="d-edge accent" style="--i:1" d="M82 130H190"/><path class="d-arrow accent" style="--i:1" d="M184 124L192 130L184 136Z"/><path class="d-arrow accent" style="--i:1" d="M88 124L80 130L88 136Z"/>
+                <text class="d-label" style="--i:1" x="136" y="120" text-anchor="middle">click / 302</text>
+                <g class="d-node cmd" style="--i:2"><rect x="190" y="70" width="190" height="120"/><text class="d-text" x="285" y="96" text-anchor="middle">App servers</text><text class="d-item" x="202" y="122">- find the landing URL</text><text class="d-item" x="202" y="142">- add 1 to the count</text><text class="d-item" x="202" y="162">- reply 302 redirect</text></g>
+                <path class="d-edge accent" style="--i:3" d="M380 130H540"/><path class="d-arrow accent" style="--i:3" d="M534 124L542 130L534 136Z"/><path class="d-arrow accent" style="--i:3" d="M386 124L378 130L386 136Z"/>
+                <text class="d-label" style="--i:3" x="460" y="120" text-anchor="middle">add 1 / read</text>
+                <g class="d-node chest" style="--i:4"><rect x="540" y="90" width="200" height="80"/><text class="d-text" x="640" y="124" text-anchor="middle">Database</text><text class="d-sub" x="640" y="146" text-anchor="middle">one primary</text></g>
+                <path class="d-line" style="--i:4" d="M640 170V186"/>
+                <g class="d-note" style="--i:4"><rect x="540" y="186" width="200" height="106"/><text class="d-note-t" x="552" y="206">counts table</text><text class="d-mono" x="552" y="226">ad_id, minute  PK</text><text class="d-mono" x="552" y="244">n  (clicks)</text><text class="d-mono" x="552" y="262">ads: ad_id, url</text></g>
+                <rect class="d-packet" x="-6" y="-6" width="12" height="12" opacity="0"><animateMotion dur="8s" begin="1.4s" repeatCount="indefinite" keyPoints="0;1;1" keyTimes="0;.4;1" calcMode="linear" path="M82 130H540"/><animate attributeName="opacity" dur="8s" begin="1.4s" repeatCount="indefinite" values="0;1;1;0;0" keyTimes="0;.02;.38;.4;1"/></rect>
+              </svg>
+            </div>
+            <figcaption>The starting point: app servers update one counter row per click. Gold = a click travelling to the database.</figcaption>
+            <button class="replay" type="button" aria-label="Replay diagram animation">Replay</button>
+          </figure>
+
+          <aside class="callout why reveal">
+            <span class="callout-label">Why</span>
+            <p><strong>Why store counts per minute, not every click?</strong> One ad makes at most 1,440 rows a day, so a dashboard reads a few rows instead of millions.</p>
+          </aside>
+        </section>
+
+        <section class="sec" id="2026-11-05-ad-click-counter-sec-deepdives">
+          <h3>Deep dives</h3>
+          <div class="dive reveal">
+            <h4>How do we take 6,000 clicks a second without slowing users or losing clicks?</h4>
+            <p>Updating the database inside the redirect makes users wait.</p>
+            <ol class="options">
+              <li><strong>Update the database on every click.</strong> Simple, but hot rows and slow redirects.</li>
+              <li><strong>Count in the service's memory and flush every few seconds.</strong> Fast, but a crash loses those seconds of clicks.</li>
+              <li class="pick"><strong>Put each click on a queue.</strong><span class="pick-tag">Pick</span> The redirect never waits for the database.</li>
+            </ol>
+            <p>The click service writes one small message to a <dfn class="term" title="A line of messages waiting to be handled, in order.">queue</dfn> that keeps copies on several machines, then redirects at once. A <dfn class="term" title="A background program that takes messages from a queue and does the work.">worker</dfn> called the aggregator pulls a batch every few seconds (an assumed 10), adds up clicks per ad and minute, and saves one update per group. Five thousand clicks become one write.</p>
+            <p>A message is removed only after the worker confirms it, so a crash loses nothing.</p>
+          </div>
+
+          <div class="dive reveal">
+            <h4>How do we count each click exactly once?</h4>
+            <p>Queues deliver at least once. If a worker saves a batch and crashes before confirming, the batch comes again. Users double-tap too.</p>
+            <ol class="options">
+              <li><strong>Accept small errors.</strong> Easy, but billing is wrong.</li>
+              <li><strong>Remember click ids in a cache.</strong> Fast, but a cache forgets and a crash can lose a click.</li>
+              <li class="pick"><strong>Remember click ids in the database.</strong><span class="pick-tag">Pick</span> The check and the count succeed or fail together.</li>
+            </ol>
+            <p>In one <dfn class="term" title="A group of database changes that either all happen or none do.">transaction</dfn>, the worker inserts each click_id into seen_clicks, where click_id is the primary key, and skips ids already there. It adds to counts only for new ones. A replayed batch finds every id present and adds nothing. Ids older than a day (assumed) are deleted. The ad server makes each id as a UUID.</p>
+            <p>Counts use the minute the click happened, so late clicks land in the right row.</p>
+          </div>
+
+          <div class="reveal">
+            <h4>Final design</h4>
+            <p>The dives added the queue, aggregator and seen_clicks. The <dfn class="term" title="The single front door that sends each request to the right service.">API gateway</dfn> splits traffic by job: clicks vastly outnumber dashboard views, so the click side runs and scales on its own.</p>
+            <p>The click service checks a <dfn class="term" title="A fast in-memory store for data that is ready to use.">cache</dfn> for the landing URL first (cache-aside), keyed by ad_id with a <dfn class="term" title="Time to live: how long an entry is kept before it is thrown away.">TTL</dfn> of 1 hour. On a miss it reads the <dfn class="term" title="A kept-up-to-date copy of a database that takes over if the main one dies.">replica</dfn> and stores the answer. Only the aggregator writes to the primary, which copies every write to the replica. Stats reads the replica, a moment behind: fine for a dashboard. If the cache dies, the replica answers; if the primary dies, the replica takes over.</p>
+          </div>
+
+          <figure class="diagram-fig" id="2026-11-05-ad-click-counter-final">
+            <div class="diagram-scroll" tabindex="0" role="group" aria-label="Diagram: the final ad click counter design. Scrollable on small screens.">
+              <svg class="diagram" viewBox="0 0 760 630" role="img" aria-labelledby="2026-11-05-ad-click-counter-d2-t 2026-11-05-ad-click-counter-d2-d">
+                <title id="2026-11-05-ad-click-counter-d2-t">Final ad click counter design</title>
+                <desc id="2026-11-05-ad-click-counter-d2-d">A client talks to an API gateway, which routes GET /ads/{id}/click to the click service and GET /ads/{id}/stats to the stats service. The click service checks a cache of landing URLs first, reads the replica on a miss, puts the click on a queue and replies 302. The aggregator pulls batches from the queue, skips click ids it has seen, adds counts per ad and minute, and saves them to the primary database in one transaction. The primary copies writes to a replica. The stats service reads minute counts from the replica. Signs show the cache entry, the queue message, the replica copy and the primary tables.</desc>
+                <g class="d-node grass" style="--i:0"><rect x="8" y="345" width="82" height="60"/><text class="d-text" x="49" y="380" text-anchor="middle">Client</text></g>
+                <path class="d-edge" style="--i:1" d="M90 375H110"/><path class="d-arrow" style="--i:1" d="M104 369L112 375L104 381Z"/><path class="d-arrow" style="--i:1" d="M96 369L88 375L96 381Z"/>
+                <g class="d-node" style="--i:1"><rect x="110" y="150" width="90" height="450"/><text class="d-text" x="155" y="340" text-anchor="middle">API</text><text class="d-text" x="155" y="358" text-anchor="middle">gateway</text><text class="d-item" x="118" y="388">- one door</text><text class="d-item" x="118" y="408">- by path</text></g>
+                <path class="d-edge accent" style="--i:2" d="M200 180H370"/><path class="d-arrow accent" style="--i:2" d="M364 174L372 180L364 186Z"/><path class="d-arrow accent" style="--i:2" d="M206 174L198 180L206 186Z"/>
+                <text class="d-label" style="--i:2" x="285" y="171" text-anchor="middle">GET /ads/{id}/click</text>
+                <path class="d-edge" style="--i:2" d="M200 560H370"/><path class="d-arrow" style="--i:2" d="M364 554L372 560L364 566Z"/><path class="d-arrow" style="--i:2" d="M206 554L198 560L206 566Z"/>
+                <text class="d-label" style="--i:2" x="285" y="551" text-anchor="middle">GET /ads/{id}/stats</text>
+                <g class="d-node gem" style="--i:3"><rect x="370" y="22" width="170" height="60"/><text class="d-text" x="455" y="52" text-anchor="middle">Cache</text><text class="d-sub" x="455" y="71" text-anchor="middle">Redis, in memory</text></g>
+                <path class="d-line" style="--i:3" d="M355 52H370"/>
+                <g class="d-note" style="--i:3"><rect x="170" y="7" width="185" height="90"/><text class="d-note-t" x="182" y="27">cache entry</text><text class="d-mono" x="182" y="47">key  ad_id</text><text class="d-mono" x="182" y="65">val  landing URL</text><text class="d-mono" x="182" y="83">TTL  1 hour</text></g>
+                <path class="d-edge accent" style="--i:3" d="M455 82V128"/><path class="d-arrow accent" style="--i:3" d="M449 122L455 130L461 122Z"/><path class="d-arrow accent" style="--i:3" d="M449 88L455 80L461 88Z"/>
+                <text class="d-label" style="--i:3" x="465" y="110">check first</text>
+                <g class="d-node cmd" style="--i:4"><rect x="370" y="128" width="170" height="104"/><text class="d-text" x="455" y="156" text-anchor="middle">Click</text><text class="d-item" x="382" y="182">- cache, else replica</text><text class="d-item" x="382" y="202">- queue the click</text><text class="d-item" x="382" y="222">- reply 302 redirect</text></g>
+                <path class="d-edge accent" style="--i:5" d="M540 180H620"/><path class="d-arrow accent" style="--i:5" d="M614 174L622 180L614 186Z"/>
+                <text class="d-label" style="--i:5" x="580" y="171" text-anchor="middle">new click</text>
+                <g class="d-node furnace" style="--i:5"><rect x="620" y="128" width="130" height="64"/><text class="d-text" x="685" y="158" text-anchor="middle">Queue</text><text class="d-sub" x="685" y="178" text-anchor="middle">copied, durable</text></g>
+                <path class="d-line" style="--i:5" d="M685 78V128"/>
+                <g class="d-note" style="--i:5"><rect x="560" y="8" width="190" height="70"/><text class="d-note-t" x="572" y="28">click message</text><text class="d-mono" x="572" y="48">click_id  unique</text><text class="d-mono" x="572" y="66">ad_id, time</text></g>
+                <path class="d-edge" style="--i:6" d="M685 192V250"/><path class="d-arrow" style="--i:6" d="M679 244L685 252L691 244Z"/>
+                <text class="d-label" style="--i:6" x="675" y="226" text-anchor="end">pull batch</text>
+                <g class="d-node furnace" style="--i:6"><rect x="570" y="250" width="180" height="104"/><text class="d-text" x="660" y="278" text-anchor="middle">Aggregator</text><text class="d-item" x="582" y="304">- skip seen click_ids</text><text class="d-item" x="582" y="324">- count per ad + minute</text><text class="d-item" x="582" y="344">- save in one transaction</text></g>
+                <path class="d-edge" style="--i:7" d="M685 354V410"/><path class="d-arrow" style="--i:7" d="M679 404L685 412L691 404Z"/>
+                <text class="d-label" style="--i:7" x="675" y="388" text-anchor="end">save counts</text>
+                <g class="d-node chest" style="--i:7"><rect x="620" y="410" width="130" height="64"/><text class="d-text" x="685" y="446" text-anchor="middle">Database</text><text class="d-sub" x="685" y="464" text-anchor="middle">primary</text></g>
+                <path class="d-line" style="--i:7" d="M685 474V494"/>
+                <g class="d-note" style="--i:7"><rect x="555" y="494" width="195" height="112"/><text class="d-note-t" x="567" y="514">primary tables</text><text class="d-mono" x="567" y="534">ads: ad_id PK, url</text><text class="d-mono" x="567" y="552">counts: PK ad_id, minute</text><text class="d-mono" x="567" y="570">  plus n (clicks)</text><text class="d-mono" x="567" y="588">seen: click_id PK</text></g>
+                <path class="d-edge" style="--i:8" d="M620 442H540"/><path class="d-arrow" style="--i:8" d="M546 436L538 442L546 448Z"/>
+                <text class="d-label" style="--i:8" x="580" y="433" text-anchor="middle">copies</text>
+                <g class="d-node chest" style="--i:8"><rect x="370" y="410" width="170" height="64"/><text class="d-text" x="455" y="446" text-anchor="middle">Replica</text><text class="d-sub" x="455" y="464" text-anchor="middle">copy of primary</text></g>
+                <path class="d-line" style="--i:8" d="M355 442H370"/>
+                <g class="d-note" style="--i:8"><rect x="215" y="408" width="140" height="68"/><text class="d-note-t" x="225" y="428">replica copy</text><text class="d-mono" x="225" y="448">same tables as</text><text class="d-mono" x="225" y="466">the primary</text></g>
+                <path class="d-edge accent" style="--i:4" d="M455 232V410"/><path class="d-arrow accent" style="--i:4" d="M449 404L455 412L461 404Z"/><path class="d-arrow accent" style="--i:4" d="M449 238L455 230L461 238Z"/>
+                <text class="d-label" style="--i:4" x="465" y="325">on miss</text>
+                <path class="d-edge" style="--i:9" d="M455 474V520"/><path class="d-arrow" style="--i:9" d="M449 514L455 522L461 514Z"/><path class="d-arrow" style="--i:9" d="M449 480L455 472L461 480Z"/>
+                <text class="d-label" style="--i:9" x="445" y="502" text-anchor="end">read counts</text>
+                <g class="d-node cmd" style="--i:9"><rect x="370" y="520" width="170" height="84"/><text class="d-text" x="455" y="548" text-anchor="middle">Stats</text><text class="d-item" x="382" y="574">- read minute counts</text><text class="d-item" x="382" y="594">- return one page</text></g>
+                <rect class="d-packet" x="-6" y="-6" width="12" height="12" opacity="0"><animateMotion dur="8s" begin="1.6s" repeatCount="indefinite" keyPoints="0;1;1" keyTimes="0;.4;1" calcMode="linear" path="M90 375H155V180H685V410"/><animate attributeName="opacity" dur="8s" begin="1.6s" repeatCount="indefinite" values="0;1;1;0;0" keyTimes="0;.02;.38;.4;1"/></rect>
+                <rect class="d-packet alt" x="-6" y="-6" width="12" height="12" opacity="0"><animateMotion dur="8s" begin="1.6s" repeatCount="indefinite" keyPoints="0;0;1;1" keyTimes="0;.48;.85;1" calcMode="linear" path="M90 375H155V560H455V474"/><animate attributeName="opacity" dur="8s" begin="1.6s" repeatCount="indefinite" values="0;0;1;1;0;0" keyTimes="0;.48;.49;.84;.85;1"/></rect>
+              </svg>
+            </div>
+            <figcaption>The complete system: a click service, a queue and an aggregator on the write path, and a separate stats service on the read path. Gold = a click being counted, cyan = an advertiser reading counts.</figcaption>
+            <button class="replay" type="button" aria-label="Replay diagram animation">Replay</button>
+          </figure>
+
+          <div class="next reveal">
+            <h4>What you could add next</h4>
+            <ul class="next-list">
+              <li>Keep every raw click in cheap file storage for audits and recounts.</li>
+              <li>Split the queue and counts by ad_id once one machine is too small.</li>
+              <li>Hourly rows for long date ranges.</li>
+            </ul>
+          </div>
+        </section>
+
+        <section class="sec reveal" id="2026-11-05-ad-click-counter-sec-tips">
+          <h3>Interview tips</h3>
+          <dl class="qa">
+            <div><dt>What if one ad goes viral?</dt><dd>The queue absorbs the spike, and the aggregator merges thousands of clicks into one update.</dd></div>
+            <div><dt>How do you handle 10 times the traffic?</dt><dd>Split the queue by ad_id and add workers; each worker owns its own ads.</dd></div>
+            <div><dt>Why not just count in Redis?</dt><dd>Memory can be lost in a crash.</dd></div>
+          </dl>
+          <h4>Common mistakes</h4>
+          <ul class="mistakes">
+            <li>Making the user wait for the database before redirecting.</li>
+            <li>Using 301, so browsers skip the counter next time.</li>
+          </ul>
+          <aside class="callout tip">
+            <span class="callout-label">Interview tip</span>
+            <p>Say "at-least-once delivery plus a duplicate check gives exactly-once counting".</p>
+          </aside>
+          <aside class="callout confidence">
+            <span class="callout-label">Confidence note</span>
+            <p>Traffic, 10-second batches and the 1-day window are assumptions. If the queue is unreachable, you can redirect anyway and risk losing clicks, or fail the click; for billing, both answers are defensible.</p>
+          </aside>
+        </section>
+
+        <p class="sources">Sources: Hello Interview, <a href="https://www.hellointerview.com/learn/system-design/problem-breakdowns/ad-click-aggregator">Ad click aggregator breakdown</a>; Alex Xu, <em>System Design Interview</em> (Vol. 2), "Ad click event aggregation"; <a href="https://kafka.apache.org/documentation/#semantics">Kafka docs, message delivery semantics</a>.</p>
+      </div>
+    </article>
     <article class="entry" id="2026-11-04-nearby-places" data-topic="Nearby places" data-domain="Geo &amp; location" data-date="2026-11-04" data-level="2">
       <header class="entry-head">
         <div class="entry-meta">
