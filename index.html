@@ -420,6 +420,7 @@ dfn.term{font-style:normal;border-bottom:2px dotted var(--accent);cursor:help}
       <h2><svg viewBox="0 0 12 12" aria-hidden="true"><path fill="#7A4A2A" d="M0 2h12v9H0z"/><path fill="#A86A3C" d="M1 3h10v3H1zM1 7h10v3H1z"/><path fill="#E9B526" d="M5 5h2v3H5z"/><path fill="#4A2C18" d="M0 6h5v1H0zM7 6h5v1H7z"/></svg>Archive</h2>
       <ol class="toc">
         <!-- TOC -->
+        <li><a href="#2026-11-06-web-crawler"><time datetime="2026-11-06">2026-11-06</time><span>Web crawler: never fetch twice, never hammer a site</span></a></li>
         <li><a href="#2026-11-05-ad-click-counter"><time datetime="2026-11-05">2026-11-05</time><span>Ad click counter: count every click once, even in a rush</span></a></li>
         <li><a href="#2026-11-04-nearby-places"><time datetime="2026-11-04">2026-11-04</time><span>Nearby places: boxes on a map beat measuring everything</span></a></li>
         <li><a href="#2026-11-03-news-feed"><time datetime="2026-11-03">2026-11-03</time><span>News feed: copy posts early, merge the famous late</span></a></li>
@@ -437,6 +438,275 @@ dfn.term{font-style:normal;border-bottom:2px dotted var(--accent);cursor:help}
 
   <main id="entries" tabindex="-1">
     <!-- ENTRIES -->
+    <article class="entry" id="2026-11-06-web-crawler" data-topic="Web crawler" data-domain="Queues &amp; async jobs" data-date="2026-11-06" data-level="2">
+      <header class="entry-head">
+        <div class="entry-meta">
+          <span class="chip">Queues &amp; async jobs</span>
+          <span class="level" title="Difficulty: level 2 of 3">Lv 2</span>
+          <time datetime="2026-11-06">6 Nov 2026</time>
+          <span class="read"><span class="read-time">5</span> min read</span>
+        </div>
+        <h2 class="entry-title">Design a web crawler</h2>
+        <p class="lede">A search engine can only show pages it has found. A web crawler is the robot that finds them: it opens a page, saves it, follows its links, and repeats. Links loop and sites hate being hammered, so the hard parts are repeats and politeness.</p>
+        <nav class="steps" aria-label="Sections of this design">
+          <a href="#2026-11-06-web-crawler-sec-functional">Features</a>
+          <a href="#2026-11-06-web-crawler-sec-nonfunctional">Qualities</a>
+          <a href="#2026-11-06-web-crawler-sec-entities">Entities</a>
+          <a href="#2026-11-06-web-crawler-sec-api">API</a>
+          <a href="#2026-11-06-web-crawler-sec-hld">Design</a>
+          <a href="#2026-11-06-web-crawler-sec-deepdives">Deep dives</a>
+          <a href="#2026-11-06-web-crawler-sec-tips">Tips</a>
+        </nav>
+      </header>
+
+      <div class="prose">
+        <details class="legend">
+          <summary>Legend <span class="hint">7 terms used below</span></summary>
+          <dl>
+            <div><dt>Queue</dt><dd>A line of messages waiting to be handled, in order. The sender drops a message in and moves on without waiting.</dd></div>
+            <div><dt>Worker</dt><dd>A background program that takes messages from a queue and does the work.</dd></div>
+            <div><dt>Hash</dt><dd>A fixed-size fingerprint made from some text. The same text always gives the same fingerprint.</dd></div>
+            <div><dt>Blob storage</dt><dd>A service that keeps big files (like web pages or photos) cheaply, each under a key.</dd></div>
+            <div><dt>Pre-signed URL</dt><dd>A temporary download link that works for a few minutes, so users fetch a file straight from storage.</dd></div>
+            <div><dt>Replica</dt><dd>A copy of a database that is kept up to date. It takes over if the main copy (the primary) dies.</dd></div>
+            <div><dt>API gateway</dt><dd>The single front door of a system. It receives every request and sends each one to the right service.</dd></div>
+          </dl>
+        </details>
+
+        <section class="sec reveal" id="2026-11-06-web-crawler-sec-functional">
+          <h3>Functional requirements</h3>
+          <ul class="reqs">
+            <li>Give the crawler starting URLs ("seeds").</li>
+            <li>Fetch each page, save it, find its links and crawl the new ones.</li>
+            <li>Look up a saved page by URL.</li>
+          </ul>
+          <p class="out">Out of scope: search ranking, pages built by JavaScript, images and video.</p>
+        </section>
+
+        <section class="sec reveal" id="2026-11-06-web-crawler-sec-nonfunctional">
+          <h3>Non-functional requirements</h3>
+          <ul class="reqs nfr">
+            <li><strong>Polite.</strong> A hammered site blocks us or falls over.</li>
+            <li><strong>No repeats.</strong> Pages link in circles; we would loop forever.</li>
+            <li><strong>Fast overall.</strong> Billions of pages need many fetches at once.</li>
+            <li><strong>Crash-proof.</strong> Machines die, and no URL may be lost.</li>
+          </ul>
+        </section>
+
+        <section class="sec reveal" id="2026-11-06-web-crawler-sec-entities">
+          <h3>Core entities</h3>
+          <ul class="entities">
+            <li><strong>URL row:</strong> the cleaned-up URL, its site, and whether it is queued, done or failed.</li>
+            <li><strong>Page file:</strong> the saved HTML of one page.</li>
+          </ul>
+        </section>
+
+        <section class="sec reveal" id="2026-11-06-web-crawler-sec-api">
+          <h3>API design</h3>
+          <div class="api-list">
+            <div class="api">
+              <div class="api-sig"><span class="method">POST</span><code>/seeds</code></div>
+              <p>Crawling happens later, so 202 Accepted, not 201. More than 100 URLs or a bad URL gets 400.</p>
+              <div class="io">
+                <div><span class="io-l">Request body</span><pre>{ "urls": ["https://example.com"] }</pre></div>
+                <div><span class="io-l">Response 202 Accepted</span><pre>{ "queued": 1 }</pre></div>
+              </div>
+            </div>
+            <div class="api">
+              <div class="api-sig"><span class="method get">GET</span><code>/pages?url=https://example.com</code></div>
+              <p>Returns the status and a temporary file link. A URL never crawled gets 404.</p>
+              <div class="io">
+                <div><span class="io-l">Request body</span><pre>(none)</pre></div>
+                <div><span class="io-l">Response 200 OK</span><pre>{
+  "status": "done",
+  "fetched_at": "2026-11-06T04:10Z",
+  "page_link": "https://files.example/p/ab12?sig=..."
+}</pre></div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="sec" id="2026-11-06-web-crawler-sec-hld">
+          <h3>High-level design</h3>
+          <div class="reveal">
+            <p>Assume 100 million pages a day, about 1,200 a second (100M / 86,400). At an assumed 100 KB each that is 10 TB a day, too much for a database, so page files go to blob storage. Fetching is slow, so many workers fetch at once. The API is identical app servers that keep no data, behind a load balancer.</p>
+            <h4>1. Adding starting URLs</h4>
+            <p>Clean up each URL, save a row if it is new, and queue it.</p>
+            <h4>2. Crawling</h4>
+            <p>A worker takes a URL off the queue, downloads the page, saves the HTML as a file in blob storage and marks the row done. Each link it finds goes through the same step as a starting URL, so the crawl keeps itself going.</p>
+            <h4>3. Looking up a page</h4>
+            <p>Read the row by its key, then return a link to the file.</p>
+            <div class="table-scroll">
+              <table class="schema">
+                <caption>Table: urls</caption>
+                <thead><tr><th>Column</th><th>Type</th><th>Note</th></tr></thead>
+                <tbody>
+                  <tr><td>url_hash</td><td>text</td><td>primary key; a hash of the cleaned-up URL, so no counter is needed</td></tr>
+                  <tr><td>url</td><td>text</td><td>the cleaned-up URL</td></tr>
+                  <tr><td>host</td><td>text</td><td>the site name, used to be polite</td></tr>
+                  <tr><td>status</td><td>text</td><td>queued, done or failed</td></tr>
+                  <tr><td>blob_key</td><td>text</td><td>where the page file is kept</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <figure class="diagram-fig">
+            <div class="diagram-scroll" tabindex="0" role="group" aria-label="Diagram: simple web crawler architecture. Scrollable on small screens.">
+              <svg class="diagram" viewBox="0 0 760 440" role="img" aria-labelledby="2026-11-06-web-crawler-d1-t 2026-11-06-web-crawler-d1-d">
+                <title id="2026-11-06-web-crawler-d1-t">Simple web crawler architecture</title>
+                <desc id="2026-11-06-web-crawler-d1-d">A client sends seed URLs to app servers. The app servers save new URLs in a database and put them on a queue. A crawler takes URLs from the queue, fetches pages from websites and saves a row in the database. A sign beside the database shows the urls table.</desc>
+                <g class="d-node grass" style="--i:0"><rect x="2" y="50" width="80" height="60"/><text class="d-text" x="42" y="85" text-anchor="middle">Client</text></g>
+                <path class="d-edge accent" style="--i:1" d="M82 80H150"/><path class="d-arrow accent" style="--i:1" d="M144 74L152 80L144 86Z"/>
+                <text class="d-label" style="--i:1" x="116" y="70" text-anchor="middle">seed URL</text>
+                <g class="d-node cmd" style="--i:2"><rect x="150" y="30" width="170" height="100"/><text class="d-text" x="235" y="56" text-anchor="middle">App servers</text><text class="d-item" x="162" y="82">- clean up the URL</text><text class="d-item" x="162" y="102">- add row if new</text><text class="d-item" x="162" y="122">- queue it</text></g>
+                <path class="d-edge accent" style="--i:3" d="M320 80H400"/><path class="d-arrow accent" style="--i:3" d="M394 74L402 80L394 86Z"/>
+                <text class="d-label" style="--i:3" x="360" y="70" text-anchor="middle">new URL</text>
+                <g class="d-node furnace" style="--i:4"><rect x="400" y="50" width="130" height="60"/><text class="d-text" x="465" y="78" text-anchor="middle">Queue</text><text class="d-sub" x="465" y="98" text-anchor="middle">URLs to crawl</text></g>
+                <path class="d-edge accent" style="--i:5" d="M465 110V190"/><path class="d-arrow accent" style="--i:5" d="M459 184L465 192L471 184Z"/>
+                <text class="d-label" style="--i:5" x="475" y="156">next URL</text>
+                <g class="d-node furnace" style="--i:6"><rect x="370" y="190" width="190" height="100"/><text class="d-text" x="465" y="216" text-anchor="middle">Crawler</text><text class="d-item" x="382" y="242">- take a URL</text><text class="d-item" x="382" y="262">- fetch the page</text><text class="d-item" x="382" y="282">- save it, find links</text></g>
+                <path class="d-edge accent" style="--i:7" d="M560 240H620"/><path class="d-arrow accent" style="--i:7" d="M614 234L622 240L614 246Z"/>
+                <text class="d-label" style="--i:7" x="590" y="230" text-anchor="middle">fetch</text>
+                <g class="d-node" style="--i:7"><rect x="620" y="200" width="130" height="80"/><text class="d-text" x="685" y="234" text-anchor="middle">Websites</text><text class="d-sub" x="685" y="256" text-anchor="middle">other people's</text></g>
+                <path class="d-edge" style="--i:8" d="M370 240H300"/><path class="d-arrow" style="--i:8" d="M306 234L298 240L306 246Z"/>
+                <text class="d-label" style="--i:8" x="335" y="230" text-anchor="middle">save row</text>
+                <g class="d-node chest" style="--i:8"><rect x="130" y="200" width="170" height="80"/><text class="d-text" x="215" y="234" text-anchor="middle">Database</text><text class="d-sub" x="215" y="256" text-anchor="middle">one primary</text></g>
+                <path class="d-edge" style="--i:9" d="M235 130V200"/><path class="d-arrow" style="--i:9" d="M229 194L235 202L241 194Z"/><path class="d-arrow" style="--i:9" d="M229 136L235 128L241 136Z"/>
+                <text class="d-label" style="--i:9" x="245" y="170">is it new?</text>
+                <path class="d-line" style="--i:9" d="M215 280V310"/>
+                <g class="d-note" style="--i:9"><rect x="120" y="310" width="190" height="106"/><text class="d-note-t" x="132" y="330">urls table</text><text class="d-mono" x="132" y="350">url_hash  PK</text><text class="d-mono" x="132" y="368">url, host</text><text class="d-mono" x="132" y="386">status, blob_key</text></g>
+                <rect class="d-packet" x="-6" y="-6" width="12" height="12" opacity="0"><animateMotion dur="8s" begin="1.4s" repeatCount="indefinite" keyPoints="0;1;1" keyTimes="0;.4;1" calcMode="linear" path="M82 80H465V240H620"/><animate attributeName="opacity" dur="8s" begin="1.4s" repeatCount="indefinite" values="0;1;1;0;0" keyTimes="0;.02;.38;.4;1"/></rect>
+              </svg>
+            </div>
+            <figcaption>The starting point: app servers queue new URLs, and a crawler takes them one by one. Gold = a URL travelling from seed to fetch.</figcaption>
+            <button class="replay" type="button" aria-label="Replay diagram animation">Replay</button>
+          </figure>
+
+          <aside class="callout why reveal">
+            <span class="callout-label">Why</span>
+            <p><strong>Why a queue between adding and crawling?</strong> The queue is the to-do list. It survives crashes, and when it grows we simply add workers.</p>
+          </aside>
+        </section>
+
+        <section class="sec" id="2026-11-06-web-crawler-sec-deepdives">
+          <h3>Deep dives</h3>
+          <div class="dive reveal">
+            <h4>How do we avoid crawling the same page twice?</h4>
+            <p>Pages link to each other in loops.</p>
+            <ol class="options">
+              <li><strong>Keep seen URLs in each worker's memory.</strong> Fast, but lost on a crash and not shared.</li>
+              <li><strong>Use a Bloom filter.</strong> Tiny, but it sometimes wrongly says "seen".</li>
+              <li class="pick"><strong>Check the urls table.</strong><span class="pick-tag">Pick</span> Exact and shared.</li>
+            </ol>
+            <p>First clean each URL: lowercase the site name, drop the part after <code>#</code>, and remove the default port. Take a <dfn class="term" title="A fixed-size fingerprint of some text. The same text always gives the same fingerprint.">hash</dfn> of the result and insert it as url_hash, the primary key. If the row already exists the insert does nothing, and only a URL that was really inserted goes on the queue. A small job re-queues rows stuck in "queued" for over an hour, in case we crashed in between.</p>
+          </div>
+
+          <div class="dive reveal">
+            <h4>How do we stay polite to every website?</h4>
+            <p>Sites publish rules in robots.txt, and many workers must not hit one site at once.</p>
+            <ol class="options">
+              <li><strong>One queue, any worker takes any URL.</strong> Simple, but workers can hit one site together.</li>
+              <li><strong>Lock each site before fetching.</strong> Works, but every fetch waits on a lock.</li>
+              <li class="pick"><strong>Split the queue by site.</strong><span class="pick-tag">Pick</span> One worker owns each site, so it can pace itself.</li>
+            </ol>
+            <p>The queue is split into parts, and the hash of the site name picks the part. One <dfn class="term" title="A background program that takes messages from a queue and does the work.">worker</dfn> reads each part, so all URLs of one site go to one worker. It waits about a second between fetches to one site (assumed) and caches that site's robots.txt rules in memory for 1 day (key: site, value: rules).</p>
+          </div>
+
+          <div class="reveal">
+            <h4>Final design</h4>
+            <p>The dives added the table check and the queue split by site. The <dfn class="term" title="The single front door that sends each request to the right service.">API gateway</dfn> splits traffic by job: the seed service takes writes, the page service takes lookups, and crawler workers answer no requests, so we add workers when the queue grows.</p>
+            <p>Page files sit in <dfn class="term" title="A service that keeps big files cheaply, each under a key.">blob storage</dfn>. The page service returns a <dfn class="term" title="A temporary download link that works for a few minutes.">pre-signed URL</dfn> valid for 10 minutes (assumed), so downloads skip our servers. The queue keeps copies on several machines and removes a message only after the worker finishes, so a crashed worker's URL comes back, and after 3 tries (assumed) it is marked failed. The primary copies writes to a <dfn class="term" title="A kept-up-to-date copy of a database that takes over if the main one dies.">replica</dfn> that takes over if it dies. Lookups read the replica, a moment behind, which is fine; the insert check uses the primary, to be exact.</p>
+          </div>
+
+          <figure class="diagram-fig" id="2026-11-06-web-crawler-final">
+            <div class="diagram-scroll" tabindex="0" role="group" aria-label="Diagram: the final web crawler design. Scrollable on small screens.">
+              <svg class="diagram" viewBox="0 0 760 710" role="img" aria-labelledby="2026-11-06-web-crawler-d2-t 2026-11-06-web-crawler-d2-d">
+                <title id="2026-11-06-web-crawler-d2-t">Final web crawler design</title>
+                <desc id="2026-11-06-web-crawler-d2-d">A client talks to an API gateway, which routes POST /seeds to the seed service and GET /pages to the page service. The seed service cleans each URL, adds a row to the primary database if it is new and puts it on the queue. The crawler takes URLs from the queue, keeps robots.txt rules in memory, fetches pages, saves the HTML to blob storage, and marks rows and adds new links in the primary database. The primary copies writes to a replica. The page service reads the row from the replica and makes a pre-signed link to the file in blob storage. Signs show the queue message, the urls table, the replica copy and the stored page file.</desc>
+                <g class="d-node grass" style="--i:0"><rect x="8" y="310" width="82" height="60"/><text class="d-text" x="49" y="345" text-anchor="middle">Client</text></g>
+                <path class="d-edge" style="--i:1" d="M90 340H110"/><path class="d-arrow" style="--i:1" d="M104 334L112 340L104 346Z"/><path class="d-arrow" style="--i:1" d="M96 334L88 340L96 346Z"/>
+                <g class="d-node" style="--i:1"><rect x="110" y="130" width="90" height="510"/><text class="d-text" x="155" y="340" text-anchor="middle">API</text><text class="d-text" x="155" y="358" text-anchor="middle">gateway</text><text class="d-item" x="118" y="388">- one door</text><text class="d-item" x="118" y="408">- by path</text></g>
+                <path class="d-edge accent" style="--i:2" d="M200 172H350"/><path class="d-arrow accent" style="--i:2" d="M344 166L352 172L344 178Z"/>
+                <text class="d-label" style="--i:2" x="275" y="163" text-anchor="middle">POST /seeds</text>
+                <g class="d-node cmd" style="--i:2"><rect x="350" y="130" width="170" height="106"/><text class="d-text" x="435" y="156" text-anchor="middle">Seed</text><text class="d-item" x="362" y="182">- clean up the URL</text><text class="d-item" x="362" y="202">- add row if new</text><text class="d-item" x="362" y="222">- queue it, reply 202</text></g>
+                <path class="d-edge accent" style="--i:3" d="M520 172H620"/><path class="d-arrow accent" style="--i:3" d="M614 166L622 172L614 178Z"/>
+                <text class="d-label" style="--i:3" x="570" y="163" text-anchor="middle">new URL</text>
+                <g class="d-node furnace" style="--i:3"><rect x="620" y="130" width="130" height="64"/><text class="d-text" x="685" y="160" text-anchor="middle">Queue</text><text class="d-sub" x="685" y="180" text-anchor="middle">split by site</text></g>
+                <path class="d-line" style="--i:3" d="M685 78V130"/>
+                <g class="d-note" style="--i:3"><rect x="560" y="8" width="190" height="70"/><text class="d-note-t" x="572" y="28">crawl message</text><text class="d-mono" x="572" y="48">url, host (the key)</text><text class="d-mono" x="572" y="66">tries so far</text></g>
+                <path class="d-edge accent" style="--i:4" d="M685 194V250"/><path class="d-arrow accent" style="--i:4" d="M679 244L685 252L691 244Z"/><path class="d-arrow accent" style="--i:4" d="M679 200L685 192L691 200Z"/>
+                <text class="d-label" style="--i:4" x="675" y="216" text-anchor="end">take URL</text>
+                <text class="d-label" style="--i:4" x="675" y="236" text-anchor="end">add links</text>
+                <g class="d-node furnace" style="--i:4"><rect x="570" y="250" width="180" height="120"/><text class="d-text" x="660" y="276" text-anchor="middle">Crawler</text><text class="d-item" x="582" y="302">- one worker per site</text><text class="d-item" x="582" y="322">- obey robots.txt, wait</text><text class="d-item" x="582" y="342">- fetch, save the page</text><text class="d-item" x="582" y="362">- find links, add new</text></g>
+                <path class="d-edge" style="--i:5" d="M570 322H490"/><path class="d-arrow" style="--i:5" d="M496 316L488 322L496 328Z"/><path class="d-arrow" style="--i:5" d="M564 316L572 322L564 328Z"/>
+                <text class="d-label" style="--i:5" x="530" y="313" text-anchor="middle">add/mark</text>
+                <g class="d-node chest" style="--i:5"><rect x="350" y="290" width="140" height="64"/><text class="d-text" x="420" y="320" text-anchor="middle">Database</text><text class="d-sub" x="420" y="340" text-anchor="middle">primary</text></g>
+                <path class="d-line" style="--i:5" d="M335 322H350"/>
+                <g class="d-note" style="--i:5"><rect x="210" y="262" width="125" height="120"/><text class="d-note-t" x="220" y="282">urls table</text><text class="d-mono" x="220" y="302">url_hash  PK</text><text class="d-mono" x="220" y="320">url, host</text><text class="d-mono" x="220" y="338">status</text><text class="d-mono" x="220" y="356">blob_key</text></g>
+                <path class="d-edge" style="--i:5" d="M420 236V290"/><path class="d-arrow" style="--i:5" d="M414 284L420 292L426 284Z"/><path class="d-arrow" style="--i:5" d="M414 242L420 234L426 242Z"/>
+                <text class="d-label" style="--i:5" x="430" y="262">add if new</text>
+                <path class="d-edge" style="--i:6" d="M420 354V400"/><path class="d-arrow" style="--i:6" d="M414 394L420 402L426 394Z"/>
+                <text class="d-label" style="--i:6" x="430" y="382">copies</text>
+                <g class="d-node chest" style="--i:6"><rect x="350" y="400" width="140" height="64"/><text class="d-text" x="420" y="430" text-anchor="middle">Replica</text><text class="d-sub" x="420" y="450" text-anchor="middle">copy of primary</text></g>
+                <path class="d-line" style="--i:6" d="M335 432H350"/>
+                <g class="d-note" style="--i:6"><rect x="210" y="402" width="125" height="60"/><text class="d-note-t" x="220" y="422">replica copy</text><text class="d-mono" x="220" y="442">same urls table</text></g>
+                <path class="d-edge" style="--i:7" d="M420 464V520"/><path class="d-arrow" style="--i:7" d="M414 514L420 522L426 514Z"/><path class="d-arrow" style="--i:7" d="M414 470L420 462L426 470Z"/>
+                <text class="d-label" style="--i:7" x="430" y="497">read row</text>
+                <path class="d-edge" style="--i:7" d="M200 567H350"/><path class="d-arrow" style="--i:7" d="M344 561L352 567L344 573Z"/><path class="d-arrow" style="--i:7" d="M206 561L198 567L206 573Z"/>
+                <text class="d-label" style="--i:7" x="275" y="558" text-anchor="middle">GET /pages</text>
+                <g class="d-node cmd" style="--i:7"><rect x="350" y="520" width="170" height="106"/><text class="d-text" x="435" y="546" text-anchor="middle">Page</text><text class="d-item" x="362" y="572">- look up the URL row</text><text class="d-item" x="362" y="592">- make a signed link</text><text class="d-item" x="362" y="612">- return status + link</text></g>
+                <path class="d-edge" style="--i:8" d="M520 552H620"/><path class="d-arrow" style="--i:8" d="M614 546L622 552L614 558Z"/>
+                <text class="d-label" style="--i:8" x="570" y="543" text-anchor="middle">sign link</text>
+                <path class="d-edge accent" style="--i:8" d="M685 370V520"/><path class="d-arrow accent" style="--i:8" d="M679 514L685 522L691 514Z"/>
+                <text class="d-label" style="--i:8" x="675" y="450" text-anchor="end">save page</text>
+                <g class="d-node chest" style="--i:8"><rect x="620" y="520" width="130" height="64"/><text class="d-text" x="685" y="548" text-anchor="middle">Blob store</text><text class="d-sub" x="685" y="568" text-anchor="middle">page files</text></g>
+                <path class="d-line" style="--i:8" d="M685 584V604"/>
+                <g class="d-note" style="--i:8"><rect x="555" y="604" width="195" height="88"/><text class="d-note-t" x="567" y="624">page file</text><text class="d-mono" x="567" y="644">key  blob_key</text><text class="d-mono" x="567" y="662">val  raw HTML</text><text class="d-mono" x="567" y="680">link lasts 10 min</text></g>
+                <rect class="d-packet" x="-6" y="-6" width="12" height="12" opacity="0"><animateMotion dur="8s" begin="1.6s" repeatCount="indefinite" keyPoints="0;1;1" keyTimes="0;.4;1" calcMode="linear" path="M90 340H155V172H685V520"/><animate attributeName="opacity" dur="8s" begin="1.6s" repeatCount="indefinite" values="0;1;1;0;0" keyTimes="0;.02;.38;.4;1"/></rect>
+                <rect class="d-packet alt" x="-6" y="-6" width="12" height="12" opacity="0"><animateMotion dur="8s" begin="1.6s" repeatCount="indefinite" keyPoints="0;0;1;1" keyTimes="0;.48;.85;1" calcMode="linear" path="M90 340H155V567H420V464"/><animate attributeName="opacity" dur="8s" begin="1.6s" repeatCount="indefinite" values="0;0;1;1;0;0" keyTimes="0;.48;.49;.84;.85;1"/></rect>
+              </svg>
+            </div>
+            <figcaption>The complete system: a seed service, a queue split by site and crawler workers on the write path, and a separate page service on the read path. Gold = a URL being crawled, cyan = a page lookup.</figcaption>
+            <button class="replay" type="button" aria-label="Replay diagram animation">Replay</button>
+          </figure>
+
+          <div class="next reveal">
+            <h4>What you could add next</h4>
+            <ul class="next-list">
+              <li>Re-crawl pages on a schedule based on how often they change.</li>
+              <li>Crawl important sites first.</li>
+              <li>Split the urls table by url_hash when one machine is too small.</li>
+            </ul>
+          </div>
+        </section>
+
+        <section class="sec reveal" id="2026-11-06-web-crawler-sec-tips">
+          <h3>Interview tips</h3>
+          <dl class="qa">
+            <div><dt>What are spider traps?</dt><dd>Sites with endless fake links; cap URL length and depth.</dd></div>
+            <div><dt>How do you catch the same content at different URLs?</dt><dd>Hash the page content and compare it with stored hashes.</dd></div>
+            <div><dt>How do you keep pages fresh?</dt><dd>Re-queue each URL after a delay, shorter for pages that change often.</dd></div>
+          </dl>
+          <h4>Common mistakes</h4>
+          <ul class="mistakes">
+            <li>Ignoring robots.txt and per-site limits.</li>
+            <li>Keeping the seen-URL set in one program's memory, where a crash wipes it.</li>
+          </ul>
+          <aside class="callout tip">
+            <span class="callout-label">Interview tip</span>
+            <p>Say the loop aloud: take a URL, fetch, save, find links, skip seen ones, queue the rest.</p>
+          </aside>
+          <aside class="callout confidence">
+            <span class="callout-label">Confidence note</span>
+            <p>Traffic, page size, the pause, the link time and the 3 tries are assumptions. A Bloom filter for seen URLs is also valid; the table is simpler and exact.</p>
+          </aside>
+        </section>
+
+        <p class="sources">Sources: Hello Interview, <a href="https://www.hellointerview.com/learn/system-design/problem-breakdowns/web-crawler">Web crawler breakdown</a>; Alex Xu, <em>System Design Interview</em> (Vol. 1), "Design a web crawler"; <a href="https://www.rfc-editor.org/rfc/rfc9309">RFC 9309, Robots Exclusion Protocol</a>.</p>
+      </div>
+    </article>
     <article class="entry" id="2026-11-05-ad-click-counter" data-topic="Ad click counter" data-domain="Write-heavy logging" data-date="2026-11-05" data-level="2">
       <header class="entry-head">
         <div class="entry-meta">
