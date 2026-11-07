@@ -420,6 +420,7 @@ dfn.term{font-style:normal;border-bottom:2px dotted var(--accent);cursor:help}
       <h2><svg viewBox="0 0 12 12" aria-hidden="true"><path fill="#7A4A2A" d="M0 2h12v9H0z"/><path fill="#A86A3C" d="M1 3h10v3H1zM1 7h10v3H1z"/><path fill="#E9B526" d="M5 5h2v3H5z"/><path fill="#4A2C18" d="M0 6h5v1H0zM7 6h5v1H7z"/></svg>Archive</h2>
       <ol class="toc">
         <!-- TOC -->
+        <li><a href="#2026-11-07-photo-sharing"><time datetime="2026-11-07">2026-11-07</time><span>Photo sharing: upload straight to storage, serve from a CDN</span></a></li>
         <li><a href="#2026-11-06-web-crawler"><time datetime="2026-11-06">2026-11-06</time><span>Web crawler: never fetch twice, never hammer a site</span></a></li>
         <li><a href="#2026-11-05-ad-click-counter"><time datetime="2026-11-05">2026-11-05</time><span>Ad click counter: count every click once, even in a rush</span></a></li>
         <li><a href="#2026-11-04-nearby-places"><time datetime="2026-11-04">2026-11-04</time><span>Nearby places: boxes on a map beat measuring everything</span></a></li>
@@ -438,6 +439,293 @@ dfn.term{font-style:normal;border-bottom:2px dotted var(--accent);cursor:help}
 
   <main id="entries" tabindex="-1">
     <!-- ENTRIES -->
+    <article class="entry" id="2026-11-07-photo-sharing" data-topic="Photo sharing" data-domain="Media &amp; files" data-date="2026-11-07" data-level="2">
+      <header class="entry-head">
+        <div class="entry-meta">
+          <span class="chip">Media &amp; files</span>
+          <span class="level" title="Difficulty: level 2 of 3">Lv 2</span>
+          <time datetime="2026-11-07">7 Nov 2026</time>
+          <span class="read"><span class="read-time">4</span> min read</span>
+        </div>
+        <h2 class="entry-title">Design photo sharing</h2>
+        <p class="lede">People upload photos, and other people open them. Photos are big files and are viewed far more often than they are uploaded, so the interview is about moving files without clogging your servers.</p>
+        <nav class="steps" aria-label="Sections of this design">
+          <a href="#2026-11-07-photo-sharing-sec-functional">Features</a>
+          <a href="#2026-11-07-photo-sharing-sec-nonfunctional">Qualities</a>
+          <a href="#2026-11-07-photo-sharing-sec-entities">Entities</a>
+          <a href="#2026-11-07-photo-sharing-sec-api">API</a>
+          <a href="#2026-11-07-photo-sharing-sec-hld">Design</a>
+          <a href="#2026-11-07-photo-sharing-sec-deepdives">Deep dives</a>
+          <a href="#2026-11-07-photo-sharing-sec-tips">Tips</a>
+        </nav>
+      </header>
+
+      <div class="prose">
+        <details class="legend">
+          <summary>Legend <span class="hint">7 terms used below</span></summary>
+          <dl>
+            <div><dt>Blob storage</dt><dd>A service that keeps big files (like photos) cheaply, each under a key. It stores several copies, so one broken disk loses nothing.</dd></div>
+            <div><dt>Pre-signed URL</dt><dd>A temporary link, made by our server, that lets a user upload or download one file straight from storage.</dd></div>
+            <div><dt>API gateway</dt><dd>The single front door of a system. It receives every request and sends each one to the right service.</dd></div>
+            <div><dt>CDN</dt><dd>A network of servers around the world that keep copies of files, so each viewer gets them from a nearby machine.</dd></div>
+            <div><dt>Queue</dt><dd>A line of messages waiting to be handled, in order. The sender drops a message in and moves on without waiting.</dd></div>
+            <div><dt>Worker</dt><dd>A background program that takes messages from a queue and does the work.</dd></div>
+            <div><dt>Replica</dt><dd>A copy of a database that is kept up to date. It takes over if the main copy (the primary) dies.</dd></div>
+          </dl>
+        </details>
+
+        <section class="sec reveal" id="2026-11-07-photo-sharing-sec-functional">
+          <h3>Functional requirements</h3>
+          <ul class="reqs">
+            <li>Upload a photo with a caption.</li>
+            <li>Open one photo.</li>
+            <li>See a user's photos, newest first.</li>
+          </ul>
+          <p class="out">Out of scope: the news feed, likes, comments, follows and video.</p>
+        </section>
+
+        <section class="sec reveal" id="2026-11-07-photo-sharing-sec-nonfunctional">
+          <h3>Non-functional requirements</h3>
+          <ul class="reqs nfr">
+            <li><strong>Fast to open.</strong> Viewers outnumber uploaders by far, and slow images make them leave.</li>
+            <li><strong>Never lose a photo.</strong> Photos are memories.</li>
+            <li><strong>Uploads must not hog servers.</strong> A photo is megabytes, so pushing it through our servers would choke them.</li>
+          </ul>
+        </section>
+
+        <section class="sec reveal" id="2026-11-07-photo-sharing-sec-entities">
+          <h3>Core entities</h3>
+          <ul class="entities">
+            <li><strong>Photo row:</strong> its id, owner, caption, status and where the file lives.</li>
+            <li><strong>Photo file:</strong> the image itself, plus a small thumbnail.</li>
+          </ul>
+        </section>
+
+        <section class="sec reveal" id="2026-11-07-photo-sharing-sec-api">
+          <h3>API design</h3>
+          <div class="api-list">
+            <div class="api">
+              <div class="api-sig"><span class="method">POST</span><code>/photos</code></div>
+              <p>Creates the photo row and returns a link. The browser then sends the file itself to that link with PUT. Over 10 MB (assumed) or not JPEG/PNG gets 400.</p>
+              <div class="io">
+                <div><span class="io-l">Request body</span><pre>{
+  "caption": "Sunset",
+  "content_type": "image/jpeg",
+  "size_bytes": 2400000
+}</pre></div>
+                <div><span class="io-l">Response 201 Created</span><pre>{
+  "photo_id": "p_9f3a",
+  "upload_url": "https://storage.example/..."
+}</pre></div>
+              </div>
+            </div>
+            <div class="api">
+              <div class="api-sig"><span class="method get">GET</span><code>/photos/{photo_id}</code></div>
+              <p>Returns the photo. Until the status is "ready" the links are empty. An unknown id gets 404.</p>
+              <div class="io">
+                <div><span class="io-l">Request body</span><pre>(none)</pre></div>
+                <div><span class="io-l">Response 200 OK</span><pre>{
+  "caption": "Sunset",
+  "status": "ready",
+  "image_url": "https://cdn.example/p_9f3a",
+  "thumb_url": "https://cdn.example/p_9f3a_t"
+}</pre></div>
+              </div>
+            </div>
+            <div class="api">
+              <div class="api-sig"><span class="method get">GET</span><code>/users/{user_id}/photos?cursor=...</code></div>
+              <p>One page of thumbnails, newest first, plus a cursor for the next page.</p>
+              <div class="io">
+                <div><span class="io-l">Request body</span><pre>(none)</pre></div>
+                <div><span class="io-l">Response 200 OK</span><pre>{
+  "photos": [{ "photo_id": "p_9f3a", "thumb_url": "..." }],
+  "next_cursor": "p_8e21"
+}</pre></div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="sec" id="2026-11-07-photo-sharing-sec-hld">
+          <h3>High-level design</h3>
+          <div class="reveal">
+            <p>Assume 10 million uploads a day, about 115 a second (10M / 86,400): easy for one database. At an assumed 2 MB each that is 20 TB a day, far too much for a database, so files go to <dfn class="term" title="A service that keeps big files cheaply, each under a key.">blob storage</dfn> and the database keeps only notes about them. Views are assumed at 100 times uploads. The API is identical app servers that keep no data, behind a load balancer.</p>
+            <h4>1. Uploading</h4>
+            <p>The server checks the request, makes a photo id with a Snowflake-style generator (ids grow with time, so sorting by id means newest first), saves a row with status "uploading" and returns a <dfn class="term" title="A temporary link that lets a user upload or download one file straight from storage.">pre-signed URL</dfn>. The browser sends the file straight to storage, so the bytes never touch our servers.</p>
+            <h4>2. Opening a photo</h4>
+            <p>Read the row by its key and return links to the files.</p>
+            <h4>3. A user's photos</h4>
+            <p>Query by user_id, newest first, 20 per page. The cursor is the last photo_id seen.</p>
+            <div class="table-scroll">
+              <table class="schema">
+                <caption>Table: photos</caption>
+                <thead><tr><th>Column</th><th>Type</th><th>Note</th></tr></thead>
+                <tbody>
+                  <tr><td>photo_id</td><td>bigint</td><td>primary key, from the id generator</td></tr>
+                  <tr><td>user_id</td><td>bigint</td><td>the owner, from the auth token</td></tr>
+                  <tr><td>caption</td><td>text</td><td>up to 200 characters</td></tr>
+                  <tr><td>status</td><td>text</td><td>uploading or ready</td></tr>
+                  <tr><td>created_at</td><td>timestamp</td><td>when the row was made</td></tr>
+                  <tr><td colspan="3">Index on (user_id, photo_id descending) serves "a user's photos".</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <figure class="diagram-fig">
+            <div class="diagram-scroll" tabindex="0" role="group" aria-label="Diagram: simple photo sharing architecture. Scrollable on small screens.">
+              <svg class="diagram" viewBox="0 0 760 520" role="img" aria-labelledby="2026-11-07-photo-sharing-d1-t 2026-11-07-photo-sharing-d1-d">
+                <title id="2026-11-07-photo-sharing-d1-t">Simple photo sharing architecture</title>
+                <desc id="2026-11-07-photo-sharing-d1-d">A client asks app servers to upload a photo. The app servers save a row in the database and return a signed link. The client then sends the photo file straight to blob storage. Signs show the photos table and the stored file.</desc>
+                <g class="d-node grass" style="--i:0"><rect x="8" y="90" width="82" height="60"/><text class="d-text" x="49" y="125" text-anchor="middle">Client</text></g>
+                <path class="d-edge accent" style="--i:1" d="M90 120H190"/><path class="d-arrow accent" style="--i:1" d="M184 114L192 120L184 126Z"/><path class="d-arrow accent" style="--i:1" d="M96 114L88 120L96 126Z"/>
+                <text class="d-label" style="--i:1" x="140" y="110" text-anchor="middle">POST /photos</text>
+                <g class="d-node cmd" style="--i:2"><rect x="190" y="60" width="190" height="106"/><text class="d-text" x="285" y="86" text-anchor="middle">App servers</text><text class="d-item" x="202" y="112">- check type and size</text><text class="d-item" x="202" y="132">- make ID, save row</text><text class="d-item" x="202" y="152">- return signed link</text></g>
+                <path class="d-edge accent" style="--i:3" d="M380 120H560"/><path class="d-arrow accent" style="--i:3" d="M554 114L562 120L554 126Z"/>
+                <text class="d-label" style="--i:3" x="470" y="110" text-anchor="middle">save row</text>
+                <g class="d-node chest" style="--i:3"><rect x="560" y="88" width="180" height="64"/><text class="d-text" x="650" y="116" text-anchor="middle">Database</text><text class="d-sub" x="650" y="136" text-anchor="middle">one primary</text></g>
+                <path class="d-line" style="--i:3" d="M650 152V190"/>
+                <g class="d-note" style="--i:3"><rect x="550" y="190" width="190" height="106"/><text class="d-note-t" x="562" y="210">photos table</text><text class="d-mono" x="562" y="230">photo_id  PK</text><text class="d-mono" x="562" y="248">user_id, caption</text><text class="d-mono" x="562" y="266">status, created_at</text><text class="d-mono" x="562" y="284">idx user_id, photo_id</text></g>
+                <path class="d-edge accent" style="--i:4" d="M49 150V372H560"/><path class="d-arrow accent" style="--i:4" d="M554 366L562 372L554 378Z"/>
+                <text class="d-label" style="--i:4" x="300" y="362" text-anchor="middle">PUT photo (signed link)</text>
+                <g class="d-node chest" style="--i:4"><rect x="560" y="340" width="180" height="64"/><text class="d-text" x="650" y="368" text-anchor="middle">Blob store</text><text class="d-sub" x="650" y="388" text-anchor="middle">photo files</text></g>
+                <path class="d-line" style="--i:4" d="M650 404V430"/>
+                <g class="d-note" style="--i:4"><rect x="550" y="430" width="190" height="70"/><text class="d-note-t" x="562" y="450">photo file</text><text class="d-mono" x="562" y="470">key  photos/ID/orig</text><text class="d-mono" x="562" y="488">val  the image</text></g>
+                <rect class="d-packet" x="-6" y="-6" width="12" height="12" opacity="0"><animateMotion dur="8s" begin="1.4s" repeatCount="indefinite" keyPoints="0;1;1" keyTimes="0;.3;1" calcMode="linear" path="M90 120H560"/><animate attributeName="opacity" dur="8s" begin="1.4s" repeatCount="indefinite" values="0;1;1;0;0" keyTimes="0;.02;.28;.3;1"/></rect>
+                <rect class="d-packet" x="-6" y="-6" width="12" height="12" opacity="0"><animateMotion dur="8s" begin="1.4s" repeatCount="indefinite" keyPoints="0;0;1;1" keyTimes="0;.4;.8;1" calcMode="linear" path="M49 150V372H560"/><animate attributeName="opacity" dur="8s" begin="1.4s" repeatCount="indefinite" values="0;0;1;1;0;0" keyTimes="0;.4;.41;.79;.8;1"/></rect>
+              </svg>
+            </div>
+            <figcaption>The starting point: the app servers only handle the small request, and the photo itself goes straight to storage. Gold = an upload.</figcaption>
+            <button class="replay" type="button" aria-label="Replay diagram animation">Replay</button>
+          </figure>
+
+          <aside class="callout why reveal">
+            <span class="callout-label">Why</span>
+            <p><strong>Why not send the photo through our servers?</strong> A 2 MB upload on a slow phone keeps a server busy for seconds. Storage is built for exactly this, so the client talks to it directly.</p>
+          </aside>
+        </section>
+
+        <section class="sec" id="2026-11-07-photo-sharing-sec-deepdives">
+          <h3>Deep dives</h3>
+          <div class="dive reveal">
+            <h4>How do we keep uploads from overloading our servers?</h4>
+            <p>Photos are big, and a server that carries them has no time for anything else.</p>
+            <ol class="options">
+              <li><strong>Upload through the app servers.</strong> Simple, but every upload ties up a server.</li>
+              <li class="pick"><strong>Upload straight to storage with a pre-signed URL.</strong><span class="pick-tag">Pick</span> Our servers only make the link.</li>
+              <li><strong>Upload in chunks.</strong> Needed for huge files or video, too much work for 10 MB photos.</li>
+            </ol>
+            <p>The link works for 15 minutes (assumed), for one file key, and carries the 10 MB cap. If the upload never happens, a nightly job deletes rows still "uploading" after a day.</p>
+          </div>
+
+          <div class="dive reveal">
+            <h4>How do we make photos open fast?</h4>
+            <p>Viewers may be far away, and a grid loads many files.</p>
+            <ol class="options">
+              <li><strong>Serve files straight from storage.</strong> Works, but far-away viewers wait.</li>
+              <li><strong>Resize on every request.</strong> Slow, and the work repeats.</li>
+              <li class="pick"><strong>A CDN plus ready-made thumbnails.</strong><span class="pick-tag">Pick</span> Near the viewer, and small files for the grid.</li>
+            </ol>
+            <p>A <dfn class="term" title="Servers around the world that keep copies of files, so each viewer gets them from a nearby machine.">CDN</dfn> caches each file by its path for 1 year (assumed). A photo never changes, so nothing needs clearing, and on a miss the CDN fetches from storage. When the file lands, storage puts a "photo uploaded" message on a <dfn class="term" title="A line of messages waiting to be handled, in order.">queue</dfn>. A <dfn class="term" title="A background program that takes messages from a queue and does the work.">worker</dfn> makes a 300 px thumbnail, saves it and sets the row to "ready". The queue keeps a message until the worker finishes.</p>
+          </div>
+
+          <div class="reveal">
+            <h4>Final design</h4>
+            <p>The dives added signed uploads, the CDN and a queue-fed resizer. The <dfn class="term" title="The single front door that sends each request to the right service.">API gateway</dfn> sends writes to the upload service and reads to the photo service, because views outnumber uploads about 100 to 1 and the read side can be scaled alone.</p>
+            <p>Storage keeps several copies of every file, so a dead disk loses no photo. The primary database copies writes to a <dfn class="term" title="A kept-up-to-date copy of a database that takes over if the main one dies.">replica</dfn> that takes over if it dies, and the photo service reads the replica; a caption a moment behind is fine. If the queue is down, uploads still work and thumbnails appear when it returns. If the CDN is down, links can fall back to storage, only slower.</p>
+          </div>
+
+          <figure class="diagram-fig" id="2026-11-07-photo-sharing-final">
+            <div class="diagram-scroll" tabindex="0" role="group" aria-label="Diagram: the final photo sharing design. Scrollable on small screens.">
+              <svg class="diagram" viewBox="0 0 760 950" role="img" aria-labelledby="2026-11-07-photo-sharing-d2-t 2026-11-07-photo-sharing-d2-d">
+                <title id="2026-11-07-photo-sharing-d2-t">Final photo sharing design</title>
+                <desc id="2026-11-07-photo-sharing-d2-d">A client talks to an API gateway, which routes POST /photos to the upload service and GET requests to the photo service. The upload service saves a row in the database and returns a signed link; the client sends the photo straight to blob storage with that link. Storage puts a photo uploaded message on a queue; the resizer takes it, reads the original, saves a thumbnail and marks the row ready. The photo service reads rows from the database and returns CDN links. The CDN fetches files from blob storage on a miss and serves them to the client. Signs show the photos table, the queue message, the stored file and the CDN copy.</desc>
+                <g class="d-node grass" style="--i:0"><rect x="8" y="230" width="82" height="60"/><text class="d-text" x="49" y="265" text-anchor="middle">Client</text></g>
+                <path class="d-edge" style="--i:1" d="M90 260H110"/><path class="d-arrow" style="--i:1" d="M104 254L112 260L104 266Z"/><path class="d-arrow" style="--i:1" d="M96 254L88 260L96 266Z"/>
+                <g class="d-node" style="--i:1"><rect x="110" y="110" width="80" height="270"/><text class="d-text" x="150" y="245" text-anchor="middle">API</text><text class="d-text" x="150" y="263" text-anchor="middle">gateway</text><text class="d-item" x="118" y="293">- one door</text><text class="d-item" x="118" y="313">- by path</text></g>
+                <path class="d-edge accent" style="--i:2" d="M190 172H340"/><path class="d-arrow accent" style="--i:2" d="M334 166L342 172L334 178Z"/>
+                <text class="d-label" style="--i:2" x="265" y="163" text-anchor="middle">POST /photos</text>
+                <g class="d-node cmd" style="--i:2"><rect x="340" y="110" width="180" height="106"/><text class="d-text" x="430" y="136" text-anchor="middle">Upload</text><text class="d-item" x="352" y="162">- check type and size</text><text class="d-item" x="352" y="182">- make ID, save row</text><text class="d-item" x="352" y="202">- return signed link</text></g>
+                <path class="d-edge accent" style="--i:3" d="M520 172H600"/><path class="d-arrow accent" style="--i:3" d="M594 166L602 172L594 178Z"/>
+                <text class="d-label" style="--i:3" x="560" y="163" text-anchor="middle">save row</text>
+                <g class="d-node chest" style="--i:3"><rect x="600" y="140" width="150" height="64"/><text class="d-text" x="675" y="168" text-anchor="middle">Database</text><text class="d-sub" x="675" y="188" text-anchor="middle">primary + replica</text></g>
+                <path class="d-line" style="--i:3" d="M675 116V140"/>
+                <g class="d-note" style="--i:3"><rect x="560" y="8" width="190" height="108"/><text class="d-note-t" x="572" y="28">photos table</text><text class="d-mono" x="572" y="48">photo_id  PK</text><text class="d-mono" x="572" y="66">user_id, caption</text><text class="d-mono" x="572" y="84">status, created_at</text><text class="d-mono" x="572" y="102">idx user_id, photo_id</text></g>
+                <path class="d-edge" style="--i:4" d="M190 300H340"/><path class="d-arrow" style="--i:4" d="M334 294L342 300L334 306Z"/><path class="d-arrow" style="--i:4" d="M196 294L188 300L196 306Z"/>
+                <text class="d-label" style="--i:4" x="265" y="291" text-anchor="middle">GET /photos/{id}</text>
+                <text class="d-label" style="--i:4" x="265" y="322" text-anchor="middle">GET /users/…/photos</text>
+                <g class="d-node cmd" style="--i:4"><rect x="340" y="250" width="180" height="106"/><text class="d-text" x="430" y="276" text-anchor="middle">Photo</text><text class="d-item" x="352" y="302">- look up the photo row</text><text class="d-item" x="352" y="322">- list a user's photos</text><text class="d-item" x="352" y="342">- build CDN links</text></g>
+                <path class="d-edge" style="--i:5" d="M520 300H560V192H600"/><path class="d-arrow" style="--i:5" d="M594 186L602 192L594 198Z"/><path class="d-arrow" style="--i:5" d="M526 294L518 300L526 306Z"/>
+                <text class="d-label" style="--i:5" x="570" y="250">read row</text>
+                <path class="d-edge" style="--i:6" d="M700 420V204"/><path class="d-arrow" style="--i:6" d="M694 210L700 202L706 210Z"/>
+                <text class="d-label" style="--i:6" x="690" y="380" text-anchor="end">mark ready</text>
+                <g class="d-node furnace" style="--i:6"><rect x="590" y="420" width="160" height="106"/><text class="d-text" x="670" y="446" text-anchor="middle">Resizer</text><text class="d-item" x="602" y="472">- fetch the original</text><text class="d-item" x="602" y="492">- make a thumbnail</text><text class="d-item" x="602" y="512">- mark photo ready</text></g>
+                <path class="d-line" style="--i:7" d="M420 446V466"/>
+                <g class="d-note" style="--i:7"><rect x="340" y="376" width="190" height="70"/><text class="d-note-t" x="352" y="396">upload message</text><text class="d-mono" x="352" y="416">photo_id (key)</text><text class="d-mono" x="352" y="434">file key</text></g>
+                <g class="d-node furnace" style="--i:7"><rect x="340" y="466" width="160" height="64"/><text class="d-text" x="420" y="494" text-anchor="middle">Queue</text><text class="d-sub" x="420" y="514" text-anchor="middle">photos to resize</text></g>
+                <path class="d-edge" style="--i:8" d="M500 498H590"/><path class="d-arrow" style="--i:8" d="M584 492L592 498L584 504Z"/>
+                <text class="d-label" style="--i:8" x="545" y="489" text-anchor="middle">next photo</text>
+                <path class="d-edge" style="--i:9" d="M670 526V650"/><path class="d-arrow" style="--i:9" d="M664 644L670 652L676 644Z"/><path class="d-arrow" style="--i:9" d="M664 532L670 524L676 532Z"/>
+                <text class="d-label" style="--i:9" x="680" y="580">read file</text>
+                <text class="d-label" style="--i:9" x="680" y="600">save thumb</text>
+                <g class="d-node chest" style="--i:9"><rect x="590" y="650" width="160" height="64"/><text class="d-text" x="670" y="678" text-anchor="middle">Blob store</text><text class="d-sub" x="670" y="698" text-anchor="middle">photo files</text></g>
+                <path class="d-line" style="--i:9" d="M600 634V650"/>
+                <g class="d-note" style="--i:9"><rect x="450" y="548" width="190" height="86"/><text class="d-note-t" x="462" y="568">photo file</text><text class="d-mono" x="462" y="588">key  photos/ID/orig</text><text class="d-mono" x="462" y="606">     photos/ID/thumb</text><text class="d-mono" x="462" y="624">val  the image</text></g>
+                <path class="d-edge" style="--i:10" d="M590 682H420V530"/><path class="d-arrow" style="--i:10" d="M414 536L420 528L426 536Z"/>
+                <text class="d-label" style="--i:10" x="505" y="673" text-anchor="middle">photo uploaded</text>
+                <path class="d-edge accent" style="--i:11" d="M30 290V920H710V714"/><path class="d-arrow accent" style="--i:11" d="M704 720L710 712L716 720Z"/>
+                <text class="d-label" style="--i:11" x="400" y="910" text-anchor="middle">PUT photo (signed link)</text>
+                <path class="d-edge" style="--i:12" d="M620 714V833H420"/><path class="d-arrow" style="--i:12" d="M426 827L418 833L426 839Z"/><path class="d-arrow" style="--i:12" d="M614 720L620 712L626 720Z"/>
+                <text class="d-label" style="--i:12" x="520" y="824" text-anchor="middle">on a miss</text>
+                <path class="d-line" style="--i:13" d="M325 776V790"/>
+                <g class="d-note" style="--i:13"><rect x="230" y="706" width="190" height="70"/><text class="d-note-t" x="242" y="726">image copy</text><text class="d-mono" x="242" y="746">key  photo path</text><text class="d-mono" x="242" y="764">val  image, TTL 1 yr</text></g>
+                <g class="d-node gem" style="--i:13"><rect x="230" y="790" width="190" height="86"/><text class="d-text" x="325" y="816" text-anchor="middle">CDN</text><text class="d-item" x="242" y="842">- copies near viewers</text><text class="d-item" x="242" y="862">- fetch from blob on miss</text></g>
+                <path class="d-edge" style="--i:14" d="M230 833H68V290"/><path class="d-arrow" style="--i:14" d="M62 296L68 288L74 296Z"/>
+                <text class="d-label" style="--i:14" x="150" y="824" text-anchor="middle">get image</text>
+                <rect class="d-packet" x="-6" y="-6" width="12" height="12" opacity="0"><animateMotion dur="8s" begin="1.6s" repeatCount="indefinite" keyPoints="0;1;1" keyTimes="0;.3;1" calcMode="linear" path="M90 260H150V172H600"/><animate attributeName="opacity" dur="8s" begin="1.6s" repeatCount="indefinite" values="0;1;1;0;0" keyTimes="0;.02;.28;.3;1"/></rect>
+                <rect class="d-packet" x="-6" y="-6" width="12" height="12" opacity="0"><animateMotion dur="8s" begin="1.6s" repeatCount="indefinite" keyPoints="0;0;1;1" keyTimes="0;.32;.62;1" calcMode="linear" path="M30 290V920H710V714"/><animate attributeName="opacity" dur="8s" begin="1.6s" repeatCount="indefinite" values="0;0;1;1;0;0" keyTimes="0;.32;.33;.61;.62;1"/></rect>
+                <rect class="d-packet alt" x="-6" y="-6" width="12" height="12" opacity="0"><animateMotion dur="8s" begin="1.6s" repeatCount="indefinite" keyPoints="0;0;1;1" keyTimes="0;.66;.97;1" calcMode="linear" path="M90 260H150V300H560V192H600"/><animate attributeName="opacity" dur="8s" begin="1.6s" repeatCount="indefinite" values="0;0;1;1;0;0" keyTimes="0;.66;.67;.96;.97;1"/></rect>
+              </svg>
+            </div>
+            <figcaption>The complete system: an upload service and a photo service behind the gateway, files in blob storage served through a CDN, and a queue-fed resizer. Gold = an upload, cyan = opening a photo.</figcaption>
+            <button class="replay" type="button" aria-label="Replay diagram animation">Replay</button>
+          </figure>
+
+          <div class="next reveal">
+            <h4>What you could add next</h4>
+            <ul class="next-list">
+              <li>Delete and edit photos, clearing the CDN copy.</li>
+              <li>Like and comment counts kept in their own store.</li>
+              <li>Split the photos table by user_id when one machine is too small.</li>
+            </ul>
+          </div>
+        </section>
+
+        <section class="sec reveal" id="2026-11-07-photo-sharing-sec-tips">
+          <h3>Interview tips</h3>
+          <dl class="qa">
+            <div><dt>How would you support huge files or video?</dt><dd>Cut the file into chunks and upload them separately, so a failed chunk is retried alone.</dd></div>
+            <div><dt>What if someone uploads the same photo twice?</dt><dd>Storing both is fine; to save space, hash the bytes and reuse a matching file.</dd></div>
+            <div><dt>How do you block bad files?</dt><dd>Limit type and size in the signed upload, and have a worker check the file before it is "ready".</dd></div>
+          </dl>
+          <h4>Common mistakes</h4>
+          <ul class="mistakes">
+            <li>Sending photo bytes through the app servers.</li>
+            <li>Storing images in the database instead of just their location.</li>
+          </ul>
+          <aside class="callout tip">
+            <span class="callout-label">Interview tip</span>
+            <p>Say early: "the database holds notes, blob storage holds files." Everything else follows from it.</p>
+          </aside>
+          <aside class="callout confidence">
+            <span class="callout-label">Confidence note</span>
+            <p>Traffic, file size, the 100-to-1 ratio, the link time and the cache time are assumptions. Uploading through the app servers is also valid for a small app.</p>
+          </aside>
+        </section>
+
+        <p class="sources">Sources: Hello Interview, <a href="https://www.hellointerview.com/learn/system-design/problem-breakdowns/instagram">Instagram breakdown</a>; <a href="https://docs.aws.amazon.com/AmazonS3/latest/userguide/using-presigned-url.html">Amazon S3 docs, presigned URLs</a>; Alex Xu, <em>System Design Interview</em> (Vol. 1), "Design Google Drive".</p>
+      </div>
+    </article>
     <article class="entry" id="2026-11-06-web-crawler" data-topic="Web crawler" data-domain="Queues &amp; async jobs" data-date="2026-11-06" data-level="2">
       <header class="entry-head">
         <div class="entry-meta">
