@@ -420,6 +420,7 @@ dfn.term{font-style:normal;border-bottom:2px dotted var(--accent);cursor:help}
       <h2><svg viewBox="0 0 12 12" aria-hidden="true"><path fill="#7A4A2A" d="M0 2h12v9H0z"/><path fill="#A86A3C" d="M1 3h10v3H1zM1 7h10v3H1z"/><path fill="#E9B526" d="M5 5h2v3H5z"/><path fill="#4A2C18" d="M0 6h5v1H0zM7 6h5v1H7z"/></svg>Archive</h2>
       <ol class="toc">
         <!-- TOC -->
+        <li><a href="#2026-11-08-unique-id-generator"><time datetime="2026-11-08">2026-11-08</time><span>Unique ID generator</span></a></li>
         <li><a href="#2026-11-07-photo-sharing"><time datetime="2026-11-07">2026-11-07</time><span>Photo sharing: upload straight to storage, serve from a CDN</span></a></li>
         <li><a href="#2026-11-06-web-crawler"><time datetime="2026-11-06">2026-11-06</time><span>Web crawler: never fetch twice, never hammer a site</span></a></li>
         <li><a href="#2026-11-05-ad-click-counter"><time datetime="2026-11-05">2026-11-05</time><span>Ad click counter: count every click once, even in a rush</span></a></li>
@@ -439,6 +440,239 @@ dfn.term{font-style:normal;border-bottom:2px dotted var(--accent);cursor:help}
 
   <main id="entries" tabindex="-1">
     <!-- ENTRIES -->
+    <article class="entry" id="2026-11-08-unique-id-generator" data-topic="Unique ID generator" data-domain="Counters &amp; limits" data-date="2026-11-08" data-level="2">
+      <header class="entry-head">
+        <div class="entry-meta">
+          <span class="chip">Counters &amp; limits</span>
+          <span class="level" title="Difficulty: level 2 of 3">Lv 2</span>
+          <time datetime="2026-11-08">8 Nov 2026</time>
+          <span class="read"><span class="read-time">4</span> min read</span>
+        </div>
+        <h2 class="entry-title">Design a unique ID generator</h2>
+        <p class="lede">Every order, message and photo needs its own number, and no two may ever match. The interview asks how to do it on many machines at once without collisions.</p>
+        <nav class="steps" aria-label="Sections of this design">
+          <a href="#2026-11-08-unique-id-generator-sec-functional">Features</a>
+          <a href="#2026-11-08-unique-id-generator-sec-nonfunctional">Qualities</a>
+          <a href="#2026-11-08-unique-id-generator-sec-entities">Entities</a>
+          <a href="#2026-11-08-unique-id-generator-sec-api">API</a>
+          <a href="#2026-11-08-unique-id-generator-sec-hld">Design</a>
+          <a href="#2026-11-08-unique-id-generator-sec-deepdives">Deep dives</a>
+          <a href="#2026-11-08-unique-id-generator-sec-tips">Tips</a>
+        </nav>
+      </header>
+
+      <div class="prose">
+        <details class="legend">
+          <summary>Legend <span class="hint">7 terms used below</span></summary>
+          <dl>
+            <div><dt>Auto-increment</dt><dd>A database counter that gives each new row the next number: 1, 2, 3 and so on.</dd></div>
+            <div><dt>Snowflake-style ID</dt><dd>A 64-bit number built from the current time, a machine number and a counter, so machines can make IDs on their own.</dd></div>
+            <div><dt>Bit</dt><dd>One 0 or 1. A 64-bit number has 64 of them, and each extra bit doubles how many values fit.</dd></div>
+            <div><dt>Epoch</dt><dd>The starting moment we count time from. We pick our own recent date so the time part stays small.</dd></div>
+            <div><dt>Lease</dt><dd>A claim on something that expires unless renewed. A machine that stops renewing loses its claim.</dd></div>
+            <div><dt>API gateway</dt><dd>The single front door of a system. It sends each request to the right service.</dd></div>
+            <div><dt>Replica</dt><dd>A kept-up-to-date copy of a database that takes over if the main copy (the primary) dies.</dd></div>
+          </dl>
+        </details>
+
+        <section class="sec reveal" id="2026-11-08-unique-id-generator-sec-functional">
+          <h3>Functional requirements</h3>
+          <ul class="reqs">
+            <li>Ask for a new ID that has never been given out.</li>
+            <li>IDs sort roughly by creation time, so newer means bigger.</li>
+            <li>Read an ID to see when and where it was made.</li>
+          </ul>
+          <p class="out">Out of scope: IDs with no gaps, exact order across machines, and hiding IDs from guessers.</p>
+        </section>
+
+        <section class="sec reveal" id="2026-11-08-unique-id-generator-sec-nonfunctional">
+          <h3>Non-functional requirements</h3>
+          <ul class="reqs nfr">
+            <li><strong>Never a duplicate.</strong> Two rows sharing an ID corrupt data.</li>
+            <li><strong>Always available and fast.</strong> Every write in the company waits for an ID.</li>
+            <li><strong>Small and sortable.</strong> A 64-bit number fits a normal database column and sorts quickly.</li>
+          </ul>
+        </section>
+
+        <section class="sec reveal" id="2026-11-08-unique-id-generator-sec-entities">
+          <h3>Core entities</h3>
+          <ul class="entities">
+            <li><strong>ID:</strong> one 64-bit number, made of a time, a machine number and a counter.</li>
+            <li><strong>Machine registry row:</strong> which machine number belongs to which running server.</li>
+          </ul>
+        </section>
+
+        <section class="sec reveal" id="2026-11-08-unique-id-generator-sec-api">
+          <h3>API design</h3>
+          <div class="api-list">
+            <div class="api">
+              <div class="api-sig"><span class="method">POST</span><code>/ids</code></div>
+              <p>Makes one new ID. If the server's clock went backwards and it cannot be sure of uniqueness, it answers 503 and the caller retries.</p>
+              <div class="io">
+                <div><span class="io-l">Request body</span><pre>(none)</pre></div>
+                <div><span class="io-l">Response 201 Created</span><pre>{
+  "id": "7192837465019392"
+}</pre></div>
+              </div>
+            </div>
+            <div class="api">
+              <div class="api-sig"><span class="method get">GET</span><code>/ids/{id}</code></div>
+              <p>Splits an ID into its parts. A value that is not a valid number gets 400.</p>
+              <div class="io">
+                <div><span class="io-l">Request body</span><pre>(none)</pre></div>
+                <div><span class="io-l">Response 200 OK</span><pre>{
+  "created_at": "2026-11-08T04:00:00.123Z",
+  "machine_id": 17,
+  "sequence": 5
+}</pre></div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="sec" id="2026-11-08-unique-id-generator-sec-hld">
+          <h3>High-level design</h3>
+          <div class="reveal">
+            <p>Assume 100,000 IDs a second across the company. The API is identical app servers that keep no user data, behind a load balancer.</p>
+            <h4>1. The obvious start</h4>
+            <p>One database with <dfn class="term" title="A database counter that gives each new row the next number.">auto-increment</dfn> hands out 1, 2, 3. It is unique and sorted, but every ID costs a database round trip, and if that database dies nobody can get an ID.</p>
+            <h4>2. Let each machine make its own</h4>
+            <p>A <dfn class="term" title="A 64-bit number built from the current time, a machine number and a counter.">Snowflake-style ID</dfn> packs three parts into 64 <dfn class="term" title="One 0 or 1; each extra bit doubles how many values fit.">bits</dfn>. Two machines can never match, because their machine numbers differ, and one machine never repeats, because its time or its counter always moves on. No talking between machines is needed per ID.</p>
+            <div class="table-scroll">
+              <table class="schema">
+                <caption>ID layout (64 bits)</caption>
+                <thead><tr><th>Part</th><th>Bits</th><th>Note</th></tr></thead>
+                <tbody>
+                  <tr><td>sign</td><td>1</td><td>always 0, so the number stays positive</td></tr>
+                  <tr><td>time</td><td>41</td><td>milliseconds since our own <dfn class="term" title="The moment we count time from; we pick a recent date of our own.">epoch</dfn>; 2^41 ms is about 69 years</td></tr>
+                  <tr><td>machine</td><td>10</td><td>up to 1,024 generators</td></tr>
+                  <tr><td>sequence</td><td>12</td><td>counts 0-4,095 within one millisecond</td></tr>
+                </tbody>
+              </table>
+            </div>
+            <p>One machine can make 4,096 IDs per millisecond, about 4 million a second, so three machines already cover 100,000 a second. Time goes in the high bits, so bigger means newer. Machine numbers come from a small registry.</p>
+          </div>
+
+          <figure class="diagram-fig">
+            <div class="diagram-scroll" tabindex="0" role="group" aria-label="Diagram: simple unique ID generator architecture. Scrollable on small screens.">
+              <svg class="diagram" viewBox="0 0 760 320" role="img" aria-labelledby="2026-11-08-unique-id-generator-d1-t 2026-11-08-unique-id-generator-d1-d">
+                <title id="2026-11-08-unique-id-generator-d1-t">Simple unique ID generator architecture</title>
+                <desc id="2026-11-08-unique-id-generator-d1-d">A client asks the app servers for an ID. Each app server builds the ID from the clock, its machine number and a counter, using no database per request. When a server starts it leases its machine number from the registry database. A sign shows the registry table.</desc>
+                <g class="d-node grass" style="--i:0"><rect x="8" y="100" width="82" height="60"/><text class="d-text" x="49" y="135" text-anchor="middle">Client</text></g>
+                <path class="d-edge accent" style="--i:1" d="M90 130H190"/><path class="d-arrow accent" style="--i:1" d="M184 124L192 130L184 136Z"/><path class="d-arrow accent" style="--i:1" d="M96 124L88 130L96 136Z"/>
+                <text class="d-label" style="--i:1" x="140" y="120" text-anchor="middle">POST /ids</text>
+                <g class="d-node cmd" style="--i:2"><rect x="190" y="70" width="190" height="120"/><text class="d-text" x="285" y="96" text-anchor="middle">App servers</text><text class="d-item" x="202" y="122">- read the clock (ms)</text><text class="d-item" x="202" y="142">- add machine number</text><text class="d-item" x="202" y="162">- add counter, return ID</text></g>
+                <path class="d-edge" style="--i:3" d="M380 130H560"/><path class="d-arrow" style="--i:3" d="M554 124L562 130L554 136Z"/><path class="d-arrow" style="--i:3" d="M386 124L378 130L386 136Z"/>
+                <text class="d-label" style="--i:3" x="470" y="120" text-anchor="middle">lease number</text>
+                <g class="d-node chest" style="--i:3"><rect x="560" y="98" width="180" height="64"/><text class="d-text" x="650" y="126" text-anchor="middle">Registry</text><text class="d-sub" x="650" y="146" text-anchor="middle">machine numbers</text></g>
+                <path class="d-line" style="--i:3" d="M650 162V200"/>
+                <g class="d-note" style="--i:3"><rect x="550" y="200" width="190" height="90"/><text class="d-note-t" x="562" y="220">machines table</text><text class="d-mono" x="562" y="240">machine_id  PK</text><text class="d-mono" x="562" y="258">host</text><text class="d-mono" x="562" y="276">lease_until</text></g>
+                <rect class="d-packet" x="-6" y="-6" width="12" height="12" opacity="0"><animateMotion dur="8s" begin="1.4s" repeatCount="indefinite" keyPoints="0;1;1" keyTimes="0;.3;1" calcMode="linear" path="M90 130H285"/><animate attributeName="opacity" dur="8s" begin="1.4s" repeatCount="indefinite" values="0;1;1;0;0" keyTimes="0;.02;.28;.3;1"/></rect>
+              </svg>
+            </div>
+            <figcaption>The starting point: each server builds IDs alone. The registry is only visited when a server starts and when it renews its lease. Gold = an ID request.</figcaption>
+            <button class="replay" type="button" aria-label="Replay diagram animation">Replay</button>
+          </figure>
+
+          <aside class="callout why reveal">
+            <span class="callout-label">Why</span>
+            <p><strong>Why not one counter in a database?</strong> It is one slow, shared point that everyone waits on. Building the ID from the clock needs no one's permission.</p>
+          </aside>
+        </section>
+
+        <section class="sec" id="2026-11-08-unique-id-generator-sec-deepdives">
+          <h3>Deep dives</h3>
+          <div class="dive reveal">
+            <h4>How do we guarantee two machines never make the same ID?</h4>
+            <p>Uniqueness is the whole point, so machine numbers must never be shared by two running servers.</p>
+            <ol class="options">
+              <li><strong>Random UUID.</strong> No coordination, but 128 bits and not sorted by time, which makes database indexes slower.</li>
+              <li><strong>Ticket server (one database counter).</strong> Simple, but a bottleneck and a single point of failure.</li>
+              <li class="pick"><strong>Snowflake-style with a leased machine number.</strong><span class="pick-tag">Pick</span> Small, sorted, and no per-ID coordination.</li>
+            </ol>
+            <p>On start, a server claims a free row in the registry and gets a <dfn class="term" title="A claim that expires unless renewed.">lease</dfn> of 30 seconds (assumed). It renews every 10 seconds. If it dies, the lease runs out and the number can be handed to a new server. Without a valid lease it makes no IDs.</p>
+          </div>
+
+          <div class="dive reveal">
+            <h4>How do we handle clock problems?</h4>
+            <p>The design trusts the clock, and clocks sometimes jump back after a time sync.</p>
+            <ol class="options">
+              <li><strong>Ignore it.</strong> Fast, but after a jump back the server could repeat an old time and make a duplicate.</li>
+              <li class="pick"><strong>Remember the last time used and refuse to go back.</strong><span class="pick-tag">Pick</span> Costs a tiny wait or an error, never a duplicate.</li>
+              <li><strong>Check the time with a central clock service.</strong> More exact, but slow and one more thing to fail.</li>
+            </ol>
+            <p>The server keeps the last millisecond it used in memory. If the clock is only a few milliseconds behind, it waits. If further behind, it returns 503 and the load balancer retries another server. If all 4,096 counter values in one millisecond are used, it waits for the next millisecond.</p>
+          </div>
+
+          <div class="reveal">
+            <h4>Final design</h4>
+            <p>The dives added the leased machine number and the clock guard. The <dfn class="term" title="The single front door that sends each request to the right service.">API gateway</dfn> splits the two jobs: creating IDs is hot and must scale on its own, while decoding is rare and needs no registry.</p>
+            <p>The registry has a <dfn class="term" title="A kept-up-to-date copy of a database that takes over if the main one dies.">replica</dfn> that takes over if the primary dies. If the registry is down, running generators keep going on their current lease; only new servers wait.</p>
+          </div>
+
+          <figure class="diagram-fig" id="2026-11-08-unique-id-generator-final">
+            <div class="diagram-scroll" tabindex="0" role="group" aria-label="Diagram: the final unique ID generator design. Scrollable on small screens.">
+              <svg class="diagram" viewBox="0 0 760 400" role="img" aria-labelledby="2026-11-08-unique-id-generator-d2-t 2026-11-08-unique-id-generator-d2-d">
+                <title id="2026-11-08-unique-id-generator-d2-t">Final unique ID generator design</title>
+                <desc id="2026-11-08-unique-id-generator-d2-d">A client talks to an API gateway. The gateway sends POST /ids to the ID generator service and GET /ids/id to the decoder service. The generator reads the clock, adds its leased machine number and a counter, and returns the ID. It leases and renews its machine number in the registry database, which has a primary and a replica. The decoder splits an ID into its parts and uses no store. A sign shows the machines table.</desc>
+                <g class="d-node grass" style="--i:0"><rect x="8" y="180" width="82" height="60"/><text class="d-text" x="49" y="215" text-anchor="middle">Client</text></g>
+                <path class="d-edge" style="--i:1" d="M90 210H110"/><path class="d-arrow" style="--i:1" d="M104 204L112 210L104 216Z"/><path class="d-arrow" style="--i:1" d="M96 204L88 210L96 216Z"/>
+                <g class="d-node" style="--i:1"><rect x="110" y="60" width="80" height="300"/><text class="d-text" x="150" y="205" text-anchor="middle">API</text><text class="d-text" x="150" y="223" text-anchor="middle">gateway</text><text class="d-item" x="118" y="253">- one door</text><text class="d-item" x="118" y="273">- by path</text></g>
+                <path class="d-edge accent" style="--i:2" d="M190 113H340"/><path class="d-arrow accent" style="--i:2" d="M334 107L342 113L334 119Z"/><path class="d-arrow accent" style="--i:2" d="M196 107L188 113L196 119Z"/>
+                <text class="d-label" style="--i:2" x="265" y="104" text-anchor="middle">POST /ids</text>
+                <g class="d-node cmd" style="--i:2"><rect x="340" y="40" width="190" height="130"/><text class="d-text" x="435" y="66" text-anchor="middle">ID generator</text><text class="d-item" x="352" y="92">- read clock; wait if</text><text class="d-item" x="362" y="112">it went backwards</text><text class="d-item" x="352" y="132">- add leased machine no.</text><text class="d-item" x="352" y="152">- add counter, return ID</text></g>
+                <path class="d-edge" style="--i:3" d="M530 105H600"/><path class="d-arrow" style="--i:3" d="M594 99L602 105L594 111Z"/><path class="d-arrow" style="--i:3" d="M536 99L528 105L536 111Z"/>
+                <text class="d-label" style="--i:3" x="565" y="96" text-anchor="middle">lease</text>
+                <g class="d-node chest" style="--i:3"><rect x="600" y="73" width="150" height="64"/><text class="d-text" x="675" y="101" text-anchor="middle">Registry</text><text class="d-sub" x="675" y="121" text-anchor="middle">primary + replica</text></g>
+                <path class="d-line" style="--i:3" d="M675 137V170"/>
+                <g class="d-note" style="--i:3"><rect x="560" y="170" width="190" height="90"/><text class="d-note-t" x="572" y="190">machines table</text><text class="d-mono" x="572" y="210">machine_id  PK</text><text class="d-mono" x="572" y="228">host</text><text class="d-mono" x="572" y="246">lease_until</text></g>
+                <path class="d-edge" style="--i:4" d="M190 300H340"/><path class="d-arrow" style="--i:4" d="M334 294L342 300L334 306Z"/><path class="d-arrow" style="--i:4" d="M196 294L188 300L196 306Z"/>
+                <text class="d-label" style="--i:4" x="265" y="291" text-anchor="middle">GET /ids/{id}</text>
+                <g class="d-node cmd" style="--i:4"><rect x="340" y="250" width="190" height="106"/><text class="d-text" x="435" y="276" text-anchor="middle">Decoder</text><text class="d-item" x="352" y="302">- split the 64 bits</text><text class="d-item" x="352" y="322">- add back the epoch</text><text class="d-item" x="352" y="342">- return time, machine</text></g>
+                <rect class="d-packet" x="-6" y="-6" width="12" height="12" opacity="0"><animateMotion dur="8s" begin="1.6s" repeatCount="indefinite" keyPoints="0;1;1" keyTimes="0;.3;1" calcMode="linear" path="M90 210H150V113H435"/><animate attributeName="opacity" dur="8s" begin="1.6s" repeatCount="indefinite" values="0;1;1;0;0" keyTimes="0;.02;.28;.3;1"/></rect>
+                <rect class="d-packet alt" x="-6" y="-6" width="12" height="12" opacity="0"><animateMotion dur="8s" begin="1.6s" repeatCount="indefinite" keyPoints="0;0;1;1" keyTimes="0;.4;.7;1" calcMode="linear" path="M90 210H150V300H435"/><animate attributeName="opacity" dur="8s" begin="1.6s" repeatCount="indefinite" values="0;0;1;1;0;0" keyTimes="0;.4;.41;.69;.7;1"/></rect>
+              </svg>
+            </div>
+            <figcaption>The complete system: a gateway in front of a generator and a decoder, with a leased machine number in the registry. Gold = making an ID, cyan = reading one.</figcaption>
+            <button class="replay" type="button" aria-label="Replay diagram animation">Replay</button>
+          </figure>
+
+          <div class="next reveal">
+            <h4>What you could add next</h4>
+            <ul class="next-list">
+              <li>Hand out IDs in blocks so callers can make a batch locally.</li>
+              <li>Spread generators over several data centres with a data-centre bit.</li>
+              <li>Add a checksum or shuffle so IDs are hard to guess.</li>
+            </ul>
+          </div>
+        </section>
+
+        <section class="sec reveal" id="2026-11-08-unique-id-generator-sec-tips">
+          <h3>Interview tips</h3>
+          <dl class="qa">
+            <div><dt>What if you need more than 4,096 IDs per millisecond per machine?</dt><dd>Add more machines, or shift a bit or two from the machine part to the sequence.</dd></div>
+            <div><dt>Why not just use a UUID?</dt><dd>It is twice as big and unsorted, so index inserts are slower.</dd></div>
+            <div><dt>What happens when the 41 time bits run out?</dt><dd>After about 69 years from our epoch. Choose a recent epoch.</dd></div>
+          </dl>
+          <h4>Common mistakes</h4>
+          <ul class="mistakes">
+            <li>Forgetting that clocks can jump backwards.</li>
+            <li>Giving two running servers the same machine number.</li>
+          </ul>
+          <aside class="callout tip">
+            <span class="callout-label">Interview tip</span>
+            <p>Draw the 64-bit layout early and say what each part guarantees. It answers most follow-ups.</p>
+          </aside>
+          <aside class="callout confidence">
+            <span class="callout-label">Confidence note</span>
+            <p>The traffic, the 30-second lease and the exact bit split are assumptions. The 41/10/12 split is a common choice, and other splits are valid.</p>
+          </aside>
+        </section>
+
+        <p class="sources">Sources: Alex Xu, <em>System Design Interview</em> (Vol. 1), "Design a Unique ID Generator in Distributed Systems"; Hello Interview, <a href="https://www.hellointerview.com/learn/system-design/in-a-hurry/introduction">system design delivery framework</a>; <a href="https://en.wikipedia.org/wiki/Snowflake_ID">Snowflake ID overview</a>.</p>
+      </div>
+    </article>
+
     <article class="entry" id="2026-11-07-photo-sharing" data-topic="Photo sharing" data-domain="Media &amp; files" data-date="2026-11-07" data-level="2">
       <header class="entry-head">
         <div class="entry-meta">
