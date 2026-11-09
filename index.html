@@ -420,6 +420,7 @@ dfn.term{font-style:normal;border-bottom:2px dotted var(--accent);cursor:help}
       <h2><svg viewBox="0 0 12 12" aria-hidden="true"><path fill="#7A4A2A" d="M0 2h12v9H0z"/><path fill="#A86A3C" d="M1 3h10v3H1zM1 7h10v3H1z"/><path fill="#E9B526" d="M5 5h2v3H5z"/><path fill="#4A2C18" d="M0 6h5v1H0zM7 6h5v1H7z"/></svg>Archive</h2>
       <ol class="toc">
         <!-- TOC -->
+        <li><a href="#2026-11-09-job-scheduler"><time datetime="2026-11-09">2026-11-09</time><span>Job scheduler: due jobs go on a queue, so none are lost</span></a></li>
         <li><a href="#2026-11-08-unique-id-generator"><time datetime="2026-11-08">2026-11-08</time><span>Unique ID generator</span></a></li>
         <li><a href="#2026-11-07-photo-sharing"><time datetime="2026-11-07">2026-11-07</time><span>Photo sharing: upload straight to storage, serve from a CDN</span></a></li>
         <li><a href="#2026-11-06-web-crawler"><time datetime="2026-11-06">2026-11-06</time><span>Web crawler: never fetch twice, never hammer a site</span></a></li>
@@ -440,6 +441,290 @@ dfn.term{font-style:normal;border-bottom:2px dotted var(--accent);cursor:help}
 
   <main id="entries" tabindex="-1">
     <!-- ENTRIES -->
+    <article class="entry" id="2026-11-09-job-scheduler" data-topic="Job scheduler" data-domain="Queues &amp; async jobs" data-date="2026-11-09" data-level="2">
+      <header class="entry-head">
+        <div class="entry-meta">
+          <span class="chip">Queues &amp; async jobs</span>
+          <span class="level" title="Difficulty: level 2 of 3">Lv 2</span>
+          <time datetime="2026-11-09">9 Nov 2026</time>
+          <span class="read"><span class="read-time">4</span> min read</span>
+        </div>
+        <h2 class="entry-title">Design a job scheduler</h2>
+        <p class="lede">You say "send this report every Monday at 9" and it just happens, even if a server dies on the way. The interview asks how to start many jobs on time without losing them or running them twice.</p>
+        <nav class="steps" aria-label="Sections of this design">
+          <a href="#2026-11-09-job-scheduler-sec-functional">Features</a>
+          <a href="#2026-11-09-job-scheduler-sec-nonfunctional">Qualities</a>
+          <a href="#2026-11-09-job-scheduler-sec-entities">Entities</a>
+          <a href="#2026-11-09-job-scheduler-sec-api">API</a>
+          <a href="#2026-11-09-job-scheduler-sec-hld">Design</a>
+          <a href="#2026-11-09-job-scheduler-sec-deepdives">Deep dives</a>
+          <a href="#2026-11-09-job-scheduler-sec-tips">Tips</a>
+        </nav>
+      </header>
+
+      <div class="prose">
+        <details class="legend">
+          <summary>Legend <span class="hint">7 terms used below</span></summary>
+          <dl>
+            <div><dt>Cron expression</dt><dd>A short text rule for repeating times. "0 9 * * 1" means 9:00 every Monday.</dd></div>
+            <div><dt>Queue</dt><dd>A waiting line of messages. One part adds messages, another takes them off when it is ready.</dd></div>
+            <div><dt>Worker</dt><dd>A background program that takes a message from a queue and does the work in it.</dd></div>
+            <div><dt>At-least-once delivery</dt><dd>The queue keeps a message until a worker confirms it finished. A message is never lost, but it may arrive twice.</dd></div>
+            <div><dt>Idempotent</dt><dd>Safe to do twice. The second time changes nothing.</dd></div>
+            <div><dt>API gateway</dt><dd>The single front door of a system. It sends each request to the right service.</dd></div>
+            <div><dt>Replica</dt><dd>A kept-up-to-date copy of a database that takes over if the main copy (the primary) dies.</dd></div>
+          </dl>
+        </details>
+
+        <section class="sec reveal" id="2026-11-09-job-scheduler-sec-functional">
+          <h3>Functional requirements</h3>
+          <ul class="reqs">
+            <li>Create a job that runs once at a set time, or repeats on a <dfn class="term" title="A short text rule for repeating times. 0 9 * * 1 means 9:00 every Monday.">cron expression</dfn>.</li>
+            <li>See a job's status and its past runs.</li>
+            <li>Cancel a job.</li>
+          </ul>
+          <p class="out">Out of scope: jobs that wait on other jobs, and tasks that run for hours.</p>
+        </section>
+
+        <section class="sec reveal" id="2026-11-09-job-scheduler-sec-nonfunctional">
+          <h3>Non-functional requirements</h3>
+          <ul class="reqs nfr">
+            <li><strong>On time.</strong> A 9:00 job should start within seconds, even when thousands are due together.</li>
+            <li><strong>Never lost.</strong> A due job must still run if a server crashes.</li>
+            <li><strong>Not run twice.</strong> A double email or double charge is a real bug.</li>
+          </ul>
+        </section>
+
+        <section class="sec reveal" id="2026-11-09-job-scheduler-sec-entities">
+          <h3>Core entities</h3>
+          <ul class="entities">
+            <li><strong>Job:</strong> what to run, its schedule and when it is next due.</li>
+            <li><strong>Run:</strong> one attempt to run a job, with start time and outcome.</li>
+          </ul>
+        </section>
+
+        <section class="sec reveal" id="2026-11-09-job-scheduler-sec-api">
+          <h3>API design</h3>
+          <div class="api-list">
+            <div class="api">
+              <div class="api-sig"><span class="method">POST</span><code>/jobs</code></div>
+              <p>Creates a job. Use <code>run_at</code> instead of <code>schedule</code> for a one-off. A bad schedule gets 400.</p>
+              <div class="io">
+                <div><span class="io-l">Request body</span><pre>{
+  "schedule": "0 9 * * 1",
+  "payload": { "task": "send_report", "report_id": 42 }
+}</pre></div>
+                <div><span class="io-l">Response 201 Created</span><pre>{
+  "job_id": "j_8271",
+  "next_run_at": "2026-11-16T03:30:00Z"
+}</pre></div>
+              </div>
+            </div>
+            <div class="api">
+              <div class="api-sig"><span class="method get">GET</span><code>/jobs/{job_id}</code></div>
+              <p>Returns the job and one page of its runs, newest first. An unknown job gets 404.</p>
+              <div class="io">
+                <div><span class="io-l">Request body</span><pre>(none; optional ?cursor=)</pre></div>
+                <div><span class="io-l">Response 200 OK</span><pre>{
+  "job_id": "j_8271",
+  "status": "active",
+  "next_run_at": "2026-11-16T03:30:00Z",
+  "runs": [
+    { "run_id": "j_8271@2026-11-09T03:30:00Z",
+      "outcome": "succeeded" }
+  ],
+  "next_cursor": null
+}</pre></div>
+              </div>
+            </div>
+            <div class="api">
+              <div class="api-sig"><span class="method delete">DELETE</span><code>/jobs/{job_id}</code></div>
+              <p>Cancels a job. A run already started is allowed to finish. Cancelling twice is fine.</p>
+              <div class="io">
+                <div><span class="io-l">Request body</span><pre>(none)</pre></div>
+                <div><span class="io-l">Response 204 No Content</span><pre>(empty)</pre></div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="sec" id="2026-11-09-job-scheduler-sec-hld">
+          <h3>High-level design</h3>
+          <div class="reveal">
+            <p>Assume 10 million jobs and 1 million runs a day: about 12 a second, so one database copes. The risk is a burst at midnight. The API is identical app servers that keep no data, behind a load balancer. Job IDs come from a Snowflake-style generator.</p>
+            <h4>1. Create a job</h4>
+            <p>The app server checks the schedule, works out the first <code>next_run_at</code> and saves one row.</p>
+            <div class="table-scroll">
+              <table class="schema">
+                <caption>Table: jobs</caption>
+                <thead><tr><th>Column</th><th>Type</th><th>Note</th></tr></thead>
+                <tbody>
+                  <tr><td>job_id</td><td>bigint</td><td>primary key</td></tr>
+                  <tr><td>owner_id, schedule, payload</td><td>text, text, json</td><td>who, when, what to run</td></tr>
+                  <tr><td>next_run_at</td><td>timestamp (UTC)</td><td>index on (status, next_run_at)</td></tr>
+                  <tr><td>status</td><td>text</td><td>active, done or cancelled</td></tr>
+                </tbody>
+              </table>
+            </div>
+            <div class="table-scroll">
+              <table class="schema">
+                <caption>Table: runs</caption>
+                <thead><tr><th>Column</th><th>Type</th><th>Note</th></tr></thead>
+                <tbody>
+                  <tr><td>run_id</td><td>text</td><td>primary key: job_id + due time</td></tr>
+                  <tr><td>job_id, outcome, tries</td><td>bigint, text, int</td><td>index on (job_id, due time) for the status page</td></tr>
+                </tbody>
+              </table>
+            </div>
+            <h4>2. Find jobs that are due</h4>
+            <p>A scheduler process wakes every second and asks for rows where <code>status = 'active'</code> and <code>next_run_at &lt;= now</code>. The index means it reads only due rows. For each, it moves <code>next_run_at</code> to the next cron time, or marks a one-off done.</p>
+            <h4>3. Run them</h4>
+            <p>The scheduler puts "run job X" on a <dfn class="term" title="A waiting line of messages. One part adds them, another takes them off.">queue</dfn>. <dfn class="term" title="A background program that takes a message from a queue and does the work in it.">Workers</dfn> take messages, run the task and save a run row. Add workers for a burst.</p>
+          </div>
+
+          <figure class="diagram-fig">
+            <div class="diagram-scroll" tabindex="0" role="group" aria-label="Diagram: simple job scheduler architecture. Scrollable on small screens.">
+              <svg class="diagram" viewBox="0 0 760 400" role="img" aria-labelledby="2026-11-09-job-scheduler-d1-t 2026-11-09-job-scheduler-d1-d">
+                <title id="2026-11-09-job-scheduler-d1-t">Simple job scheduler architecture</title>
+                <desc id="2026-11-09-job-scheduler-d1-d">A client sends POST /jobs to the app servers, which save a row in the jobs database. A scheduler finds due jobs in the database and sends them to workers, which run them. A sign above the database shows the jobs table.</desc>
+                <g class="d-node grass" style="--i:0"><rect x="8" y="192" width="82" height="60"/><text class="d-text" x="49" y="227" text-anchor="middle">Client</text></g>
+                <path class="d-edge accent" style="--i:1" d="M90 222H190"/><path class="d-arrow accent" style="--i:1" d="M184 216L192 222L184 228Z"/><path class="d-arrow accent" style="--i:1" d="M96 216L88 222L96 228Z"/>
+                <text class="d-label" style="--i:1" x="140" y="212" text-anchor="middle">POST /jobs</text>
+                <g class="d-node cmd" style="--i:2"><rect x="190" y="172" width="190" height="100"/><text class="d-text" x="285" y="198" text-anchor="middle">App servers</text><text class="d-item" x="202" y="224">- check the schedule</text><text class="d-item" x="202" y="244">- work out next_run_at</text><text class="d-item" x="202" y="264">- save the job row</text></g>
+                <path class="d-edge accent" style="--i:3" d="M380 222H560"/><path class="d-arrow accent" style="--i:3" d="M554 216L562 222L554 228Z"/><path class="d-arrow accent" style="--i:3" d="M386 216L378 222L386 228Z"/>
+                <text class="d-label" style="--i:3" x="470" y="212" text-anchor="middle">save job</text>
+                <g class="d-node chest" style="--i:3"><rect x="560" y="190" width="180" height="64"/><text class="d-text" x="650" y="218" text-anchor="middle">Jobs DB</text><text class="d-sub" x="650" y="238" text-anchor="middle">jobs table</text></g>
+                <path class="d-line" style="--i:3" d="M650 190V158"/>
+                <g class="d-note" style="--i:3"><rect x="550" y="30" width="190" height="128"/><text class="d-note-t" x="562" y="50">jobs table</text><text class="d-mono" x="562" y="72">job_id  PK</text><text class="d-mono" x="562" y="90">schedule, payload</text><text class="d-mono" x="562" y="108">next_run_at</text><text class="d-mono" x="562" y="126">status</text><text class="d-mono" x="562" y="144">idx status,next_run_at</text></g>
+                <path class="d-edge" style="--i:4" d="M650 254V300"/><path class="d-arrow" style="--i:4" d="M644 294L650 302L656 294Z"/><path class="d-arrow" style="--i:4" d="M644 260L650 252L656 260Z"/>
+                <text class="d-label" style="--i:4" x="662" y="282">find due</text>
+                <g class="d-node furnace" style="--i:5"><rect x="560" y="300" width="180" height="74"/><text class="d-text" x="650" y="326" text-anchor="middle">Scheduler</text><text class="d-item" x="572" y="352">- pick jobs now due</text><text class="d-item" x="572" y="372">- send them to run</text></g>
+                <path class="d-edge" style="--i:6" d="M560 337H380"/><path class="d-arrow" style="--i:6" d="M386 331L378 337L386 343Z"/>
+                <text class="d-label" style="--i:6" x="470" y="327" text-anchor="middle">run job</text>
+                <g class="d-node furnace" style="--i:6"><rect x="190" y="300" width="190" height="74"/><text class="d-text" x="285" y="326" text-anchor="middle">Workers</text><text class="d-item" x="202" y="352">- run the job's task</text><text class="d-item" x="202" y="372">- record the result</text></g>
+                <rect class="d-packet" x="-6" y="-6" width="12" height="12" opacity="0"><animateMotion dur="8s" begin="1.4s" repeatCount="indefinite" keyPoints="0;1;1" keyTimes="0;.3;1" calcMode="linear" path="M90 222H560"/><animate attributeName="opacity" dur="8s" begin="1.4s" repeatCount="indefinite" values="0;1;1;0;0" keyTimes="0;.02;.28;.3;1"/></rect>
+                <rect class="d-packet red" x="-6" y="-6" width="12" height="12" opacity="0"><animateMotion dur="8s" begin="1.4s" repeatCount="indefinite" keyPoints="0;0;1;1" keyTimes="0;.4;.8;1" calcMode="linear" path="M650 254V337H285"/><animate attributeName="opacity" dur="8s" begin="1.4s" repeatCount="indefinite" values="0;0;1;1;0;0" keyTimes="0;.4;.41;.79;.8;1"/></rect>
+              </svg>
+            </div>
+            <figcaption>The starting point: jobs are saved as rows, and a scheduler turns due rows into work. Gold = creating a job, red = running a due job.</figcaption>
+            <button class="replay" type="button" aria-label="Replay diagram animation">Replay</button>
+          </figure>
+
+          <aside class="callout why reveal">
+            <span class="callout-label">Why</span>
+            <p><strong>Why a queue between the scheduler and the workers?</strong> The scheduler only decides what is due, which is quick. If it ran tasks itself, one slow task would make every other job late.</p>
+          </aside>
+        </section>
+
+        <section class="sec" id="2026-11-09-job-scheduler-sec-deepdives">
+          <h3>Deep dives</h3>
+          <div class="dive reveal">
+            <h4>How do we never lose a job, and not run it twice?</h4>
+            <p>Servers can crash at any step.</p>
+            <ol class="options">
+              <li><strong>Run the task inside the scheduler.</strong> Simplest, but a crash loses the job.</li>
+              <li class="pick"><strong>Queue with at-least-once delivery.</strong><span class="pick-tag">Pick</span> Never lost, but a message may arrive twice.</li>
+              <li><strong>Try for exactly-once with distributed transactions.</strong> Slow and hard to get right.</li>
+            </ol>
+            <p>With <dfn class="term" title="The queue keeps a message until a worker confirms it finished, so it is never lost but may arrive twice.">at-least-once delivery</dfn>, a message stays hidden while a worker holds it. If the worker dies, it reappears after a timeout (5 minutes, assumed). A duplicate is harmless if the task is <dfn class="term" title="Safe to do twice; the second time changes nothing.">idempotent</dfn>. The run_id is the job plus its due time, and a worker skips any run_id already succeeded. Failed runs retry 3 times with growing waits.</p>
+          </div>
+
+          <div class="dive reveal">
+            <h4>How do we start jobs on time when many are due at once?</h4>
+            <p>One scheduler can fail or fall behind.</p>
+            <ol class="options">
+              <li><strong>One scheduler polling the database.</strong> Simple, but it stops if it dies.</li>
+              <li class="pick"><strong>Several schedulers claiming batches with row locks.</strong><span class="pick-tag">Pick</span> No single point of failure, and they split the work.</li>
+              <li><strong>One in-memory timer per job.</strong> Exact, but lost on restart and heavy on memory.</li>
+            </ol>
+            <p>Run two or three schedulers (assumed). Each second, one selects up to 500 due rows with <code>FOR UPDATE SKIP LOCKED</code>, which skips rows another scheduler holds. It enqueues them, moves <code>next_run_at</code> and commits. A crash before the commit releases the locks, so at worst a job is queued twice, which the run_id check handles.</p>
+          </div>
+
+          <div class="reveal">
+            <h4>Final design</h4>
+            <p>The dives added run_id checks and several locking schedulers. Services are split by job: the Job API takes writes, the Status API reads from the <dfn class="term" title="A kept-up-to-date copy of a database that takes over if the main one dies.">replica</dfn>, and the scheduler and workers run in the background so they never slow the API. An <dfn class="term" title="The single front door that sends each request to the right service.">API gateway</dfn> routes by path.</p>
+            <p>If the primary dies, the replica takes over. If the queue is down, due jobs stay due and run late. Status may be a second stale; claiming jobs always uses the primary.</p>
+          </div>
+
+          <figure class="diagram-fig" id="2026-11-09-job-scheduler-final">
+            <div class="diagram-scroll" tabindex="0" role="group" aria-label="Diagram: the final job scheduler design. Scrollable on small screens.">
+              <svg class="diagram" viewBox="0 0 760 770" role="img" aria-labelledby="2026-11-09-job-scheduler-d2-t 2026-11-09-job-scheduler-d2-d">
+                <title id="2026-11-09-job-scheduler-d2-t">Final job scheduler design</title>
+                <desc id="2026-11-09-job-scheduler-d2-d">A client talks to an API gateway. The gateway sends POST and DELETE on jobs to the Job API and GET on a job to the Status API. The Job API saves job rows in the Jobs database, which has a primary and a replica. The Status API reads from the replica. A scheduler claims due jobs from the database and puts them on a queue. Workers take jobs from the queue, run them and save the result in the database. Signs show the jobs and runs tables and the queue message.</desc>
+                <g class="d-node grass" style="--i:0"><rect x="8" y="130" width="82" height="60"/><text class="d-text" x="49" y="165" text-anchor="middle">Client</text></g>
+                <path class="d-edge" style="--i:1" d="M90 160H110"/><path class="d-arrow" style="--i:1" d="M104 154L112 160L104 166Z"/><path class="d-arrow" style="--i:1" d="M96 154L88 160L96 166Z"/>
+                <g class="d-node" style="--i:1"><rect x="110" y="30" width="80" height="230"/><text class="d-text" x="150" y="130" text-anchor="middle">API</text><text class="d-text" x="150" y="148" text-anchor="middle">gateway</text><text class="d-item" x="118" y="178">- one door</text><text class="d-item" x="118" y="198">- by path</text></g>
+                <path class="d-edge accent" style="--i:2" d="M190 80H320"/><path class="d-arrow accent" style="--i:2" d="M314 74L322 80L314 86Z"/><path class="d-arrow accent" style="--i:2" d="M196 74L188 80L196 86Z"/>
+                <text class="d-label" style="--i:2" x="255" y="62" text-anchor="middle">POST /jobs</text>
+                <text class="d-label" style="--i:2" x="255" y="102" text-anchor="middle">DELETE /jobs/{id}</text>
+                <g class="d-node cmd" style="--i:2"><rect x="320" y="30" width="170" height="100"/><text class="d-text" x="405" y="56" text-anchor="middle">Job API</text><text class="d-item" x="332" y="82">- check the schedule</text><text class="d-item" x="332" y="102">- save or cancel row</text><text class="d-item" x="332" y="122">- set next_run_at</text></g>
+                <path class="d-edge" style="--i:3" d="M190 200H320"/><path class="d-arrow" style="--i:3" d="M314 194L322 200L314 206Z"/><path class="d-arrow" style="--i:3" d="M196 194L188 200L196 206Z"/>
+                <text class="d-label" style="--i:3" x="255" y="190" text-anchor="middle">GET /jobs/{id}</text>
+                <g class="d-node cmd" style="--i:3"><rect x="320" y="160" width="170" height="80"/><text class="d-text" x="405" y="186" text-anchor="middle">Status API</text><text class="d-item" x="332" y="212">- read job and runs</text><text class="d-item" x="332" y="232">- use the replica</text></g>
+                <g class="d-node chest" style="--i:2"><rect x="590" y="30" width="160" height="600"/><text class="d-text" x="670" y="60" text-anchor="middle">Jobs DB</text><text class="d-sub" x="670" y="80" text-anchor="middle">primary + replica</text></g>
+                <path class="d-edge accent" style="--i:4" d="M490 80H590"/><path class="d-arrow accent" style="--i:4" d="M584 74L592 80L584 86Z"/><path class="d-arrow accent" style="--i:4" d="M496 74L488 80L496 86Z"/>
+                <text class="d-label" style="--i:4" x="540" y="70" text-anchor="middle">save job</text>
+                <path class="d-edge" style="--i:4" d="M490 200H590"/><path class="d-arrow" style="--i:4" d="M584 194L592 200L584 206Z"/><path class="d-arrow" style="--i:4" d="M496 194L488 200L496 206Z"/>
+                <text class="d-label" style="--i:4" x="540" y="190" text-anchor="middle">read copy</text>
+                <g class="d-node furnace" style="--i:5"><rect x="320" y="280" width="170" height="100"/><text class="d-text" x="405" y="306" text-anchor="middle">Scheduler</text><text class="d-item" x="332" y="332">- lock a batch of due</text><text class="d-item" x="332" y="352">- queue them, move</text><text class="d-item" x="342" y="372">next_run_at</text></g>
+                <path class="d-edge" style="--i:6" d="M490 330H590"/><path class="d-arrow" style="--i:6" d="M584 324L592 330L584 336Z"/><path class="d-arrow" style="--i:6" d="M496 324L488 330L496 336Z"/>
+                <text class="d-label" style="--i:6" x="540" y="320" text-anchor="middle">claim due</text>
+                <path class="d-edge" style="--i:7" d="M405 380V420"/><path class="d-arrow" style="--i:7" d="M399 414L405 422L411 414Z"/>
+                <text class="d-label" style="--i:7" x="417" y="405">due jobs</text>
+                <g class="d-node furnace" style="--i:7"><rect x="320" y="420" width="170" height="64"/><text class="d-text" x="405" y="446" text-anchor="middle">Queue</text><text class="d-sub" x="405" y="466" text-anchor="middle">jobs to run</text></g>
+                <path class="d-line" style="--i:7" d="M320 452H280"/>
+                <g class="d-note" style="--i:7"><rect x="100" y="405" width="180" height="90"/><text class="d-note-t" x="112" y="425">job queue</text><text class="d-mono" x="112" y="447">msg: run_id</text><text class="d-mono" x="112" y="465">  job_id, payload</text><text class="d-mono" x="112" y="483">  hidden till acked</text></g>
+                <path class="d-edge" style="--i:8" d="M405 484V524"/><path class="d-arrow" style="--i:8" d="M399 518L405 526L411 518Z"/>
+                <text class="d-label" style="--i:8" x="417" y="509">pull job</text>
+                <g class="d-node furnace" style="--i:8"><rect x="320" y="524" width="170" height="100"/><text class="d-text" x="405" y="550" text-anchor="middle">Workers</text><text class="d-item" x="332" y="576">- skip if run succeeded</text><text class="d-item" x="332" y="596">- run the task</text><text class="d-item" x="332" y="616">- save result, ack</text></g>
+                <path class="d-edge" style="--i:9" d="M490 574H590"/><path class="d-arrow" style="--i:9" d="M584 568L592 574L584 580Z"/>
+                <text class="d-label" style="--i:9" x="540" y="564" text-anchor="middle">save result</text>
+                <path class="d-line" style="--i:4" d="M670 630V650"/>
+                <g class="d-note" style="--i:4"><rect x="560" y="650" width="190" height="108"/><text class="d-note-t" x="572" y="670">jobs + runs tables</text><text class="d-mono" x="572" y="692">jobs: job_id PK</text><text class="d-mono" x="572" y="710">  next_run_at, status</text><text class="d-mono" x="572" y="728">runs: run_id PK</text><text class="d-mono" x="572" y="746">  job_id, outcome</text></g>
+                <rect class="d-packet" x="-6" y="-6" width="12" height="12" opacity="0"><animateMotion dur="8s" begin="1.6s" repeatCount="indefinite" keyPoints="0;1;1" keyTimes="0;.25;1" calcMode="linear" path="M90 160H150V80H590"/><animate attributeName="opacity" dur="8s" begin="1.6s" repeatCount="indefinite" values="0;1;1;0;0" keyTimes="0;.02;.23;.25;1"/></rect>
+                <rect class="d-packet alt" x="-6" y="-6" width="12" height="12" opacity="0"><animateMotion dur="8s" begin="1.6s" repeatCount="indefinite" keyPoints="0;0;1;1" keyTimes="0;.28;.5;1" calcMode="linear" path="M90 160H150V200H590"/><animate attributeName="opacity" dur="8s" begin="1.6s" repeatCount="indefinite" values="0;0;1;1;0;0" keyTimes="0;.28;.29;.49;.5;1"/></rect>
+                <rect class="d-packet red" x="-6" y="-6" width="12" height="12" opacity="0"><animateMotion dur="8s" begin="1.6s" repeatCount="indefinite" keyPoints="0;0;1;1" keyTimes="0;.53;.98;1" calcMode="linear" path="M590 330H405V574H590"/><animate attributeName="opacity" dur="8s" begin="1.6s" repeatCount="indefinite" values="0;0;1;1;0;0" keyTimes="0;.53;.54;.97;.98;1"/></rect>
+              </svg>
+            </div>
+            <figcaption>The complete system: a gateway in front of a write service and a read service, with a scheduler, queue and workers behind the database. Gold = creating a job, cyan = checking one, red = running a due job.</figcaption>
+            <button class="replay" type="button" aria-label="Replay diagram animation">Replay</button>
+          </figure>
+
+          <div class="next reveal">
+            <h4>What you could add next</h4>
+            <ul class="next-list">
+              <li>A dead-letter queue for jobs that keep failing, with an alert.</li>
+              <li>Priorities, so urgent jobs skip ahead of bulk ones.</li>
+              <li>Split the jobs table across several databases by job_id when one is not enough.</li>
+            </ul>
+          </div>
+        </section>
+
+        <section class="sec reveal" id="2026-11-09-job-scheduler-sec-tips">
+          <h3>Interview tips</h3>
+          <dl class="qa">
+            <div><dt>What if a task outlives the queue timeout?</dt><dd>Set it longer than the slowest task, or let the worker keep extending it.</dd></div>
+            <div><dt>How do you handle time zones?</dt><dd>Store next_run_at in UTC and keep the zone with the schedule.</dd></div>
+            <div><dt>A million jobs are due at midnight. Now what?</dt><dd>The queue absorbs it and workers scale up. Add jitter where exact seconds don't matter.</dd></div>
+          </dl>
+          <h4>Common mistakes</h4>
+          <ul class="mistakes">
+            <li>Scanning the whole table each second instead of using an index on next_run_at.</li>
+            <li>Running tasks inside the scheduler, so one slow job delays all others.</li>
+          </ul>
+          <aside class="callout tip">
+            <span class="callout-label">Interview tip</span>
+            <p>Say "at-least-once delivery plus idempotent tasks" out loud.</p>
+          </aside>
+          <aside class="callout confidence">
+            <span class="callout-label">Confidence note</span>
+            <p>The traffic, 5-minute timeout, batch size and scheduler count are assumptions. Other designs use a Redis sorted set or a timing wheel instead of database polling, and both are valid.</p>
+          </aside>
+        </section>
+
+        <p class="sources">Sources: Hello Interview, <a href="https://www.hellointerview.com/learn/system-design/problem-breakdowns/job-scheduler">job scheduler breakdown</a> and delivery framework; PostgreSQL docs on <a href="https://www.postgresql.org/docs/current/sql-select.html">SELECT ... FOR UPDATE SKIP LOCKED</a>; AWS docs on <a href="https://docs.aws.amazon.com/AWSSimpleQueueService/latest/SQSDeveloperGuide/sqs-visibility-timeout.html">SQS visibility timeout</a>.</p>
+      </div>
+    </article>
     <article class="entry" id="2026-11-08-unique-id-generator" data-topic="Unique ID generator" data-domain="Counters &amp; limits" data-date="2026-11-08" data-level="2">
       <header class="entry-head">
         <div class="entry-meta">
