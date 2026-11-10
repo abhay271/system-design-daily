@@ -420,6 +420,7 @@ dfn.term{font-style:normal;border-bottom:2px dotted var(--accent);cursor:help}
       <h2><svg viewBox="0 0 12 12" aria-hidden="true"><path fill="#7A4A2A" d="M0 2h12v9H0z"/><path fill="#A86A3C" d="M1 3h10v3H1zM1 7h10v3H1z"/><path fill="#E9B526" d="M5 5h2v3H5z"/><path fill="#4A2C18" d="M0 6h5v1H0zM7 6h5v1H7z"/></svg>Archive</h2>
       <ol class="toc">
         <!-- TOC -->
+        <li><a href="#2026-11-10-key-value-store"><time datetime="2026-11-10">2026-11-10</time><span>Key-value store: spread keys on a ring, keep three copies</span></a></li>
         <li><a href="#2026-11-09-job-scheduler"><time datetime="2026-11-09">2026-11-09</time><span>Job scheduler: due jobs go on a queue, so none are lost</span></a></li>
         <li><a href="#2026-11-08-unique-id-generator"><time datetime="2026-11-08">2026-11-08</time><span>Unique ID generator</span></a></li>
         <li><a href="#2026-11-07-photo-sharing"><time datetime="2026-11-07">2026-11-07</time><span>Photo sharing: upload straight to storage, serve from a CDN</span></a></li>
@@ -441,6 +442,239 @@ dfn.term{font-style:normal;border-bottom:2px dotted var(--accent);cursor:help}
 
   <main id="entries" tabindex="-1">
     <!-- ENTRIES -->
+    <article class="entry" id="2026-11-10-key-value-store" data-topic="Key-value store" data-domain="Read-heavy lookup" data-date="2026-11-10" data-level="2">
+      <header class="entry-head">
+        <div class="entry-meta">
+          <span class="chip">Read-heavy lookup</span>
+          <span class="level" title="Difficulty: level 2 of 3">Lv 2</span>
+          <time datetime="2026-11-10">10 Nov 2026</time>
+          <span class="read"><span class="read-time">4</span> min read</span>
+        </div>
+        <h2 class="entry-title">Design a key-value store</h2>
+        <p class="lede">A key-value store is a giant labelled shelf: you save a value under a name and later ask for it by that name. The interview asks how to spread it over many machines without losing data when one breaks.</p>
+        <nav class="steps" aria-label="Sections of this design">
+          <a href="#2026-11-10-key-value-store-sec-functional">Features</a>
+          <a href="#2026-11-10-key-value-store-sec-nonfunctional">Qualities</a>
+          <a href="#2026-11-10-key-value-store-sec-entities">Entities</a>
+          <a href="#2026-11-10-key-value-store-sec-api">API</a>
+          <a href="#2026-11-10-key-value-store-sec-hld">Design</a>
+          <a href="#2026-11-10-key-value-store-sec-deepdives">Deep dives</a>
+          <a href="#2026-11-10-key-value-store-sec-tips">Tips</a>
+        </nav>
+      </header>
+
+      <div class="prose">
+        <details class="legend">
+          <summary>Legend <span class="hint">5 terms used below</span></summary>
+          <dl>
+            <div><dt>Tombstone</dt><dd>A "this key was deleted" marker saved in place of the value. It stops an old copy from bringing the key back.</dd></div>
+            <div><dt>Hash ring</dt><dd>A circle that machines and keys are both placed on, using a hash function (a rule that turns any text into a number). A key belongs to the first machine clockwise from it.</dd></div>
+            <div><dt>Replica</dt><dd>A copy of the data kept on another machine, so one machine dying loses nothing.</dd></div>
+            <div><dt>Quorum</dt><dd>A majority. A write counts once most copies confirm it, and a read asks most copies.</dd></div>
+            <div><dt>API gateway</dt><dd>The single front door of a system. It sends each request to the right service.</dd></div>
+          </dl>
+        </details>
+
+        <section class="sec reveal" id="2026-11-10-key-value-store-sec-functional">
+          <h3>Functional requirements</h3>
+          <ul class="reqs">
+            <li>Save a value under a key.</li>
+            <li>Get the value for a key.</li>
+            <li>Delete a key.</li>
+          </ul>
+          <p class="out">Out of scope: searching by value, range queries, transactions across keys.</p>
+        </section>
+
+        <section class="sec reveal" id="2026-11-10-key-value-store-sec-nonfunctional">
+          <h3>Non-functional requirements</h3>
+          <ul class="reqs nfr">
+            <li><strong>Fast.</strong> Other systems call it on every request, so lookups take a few milliseconds.</li>
+            <li><strong>Scalable.</strong> Data and traffic outgrow one machine, so we must add machines easily.</li>
+            <li><strong>Always available.</strong> Machines fail often. Reads and writes must keep working, even if a read is briefly stale.</li>
+          </ul>
+        </section>
+
+        <section class="sec reveal" id="2026-11-10-key-value-store-sec-entities">
+          <h3>Core entities</h3>
+          <ul class="entities">
+            <li><strong>Entry:</strong> a key, its value, and a version number that says which write is newest.</li>
+            <li><strong>Node:</strong> one storage machine that holds a slice of the entries.</li>
+          </ul>
+        </section>
+
+        <section class="sec reveal" id="2026-11-10-key-value-store-sec-api">
+          <h3>API design</h3>
+          <div class="api-list">
+            <div class="api">
+              <div class="api-sig"><span class="method put">PUT</span><code>/keys/{key}</code></div>
+              <p>Saves or overwrites a value. Over 1 MB (assumed) gets 413.</p>
+              <div class="io">
+                <div><span class="io-l">Request body</span><pre>{ "value": "dark_mode=on" }</pre></div>
+                <div><span class="io-l">Response 200 OK</span><pre>{ "version": 1731200000123 }</pre></div>
+              </div>
+            </div>
+            <div class="api">
+              <div class="api-sig"><span class="method get">GET</span><code>/keys/{key}</code></div>
+              <p>Returns the newest value. A missing or deleted key gets 404.</p>
+              <div class="io">
+                <div><span class="io-l">Request body</span><pre>(none)</pre></div>
+                <div><span class="io-l">Response 200 OK</span><pre>{ "value": "dark_mode=on",
+  "version": 1731200000123 }</pre></div>
+              </div>
+            </div>
+            <div class="api">
+              <div class="api-sig"><span class="method delete">DELETE</span><code>/keys/{key}</code></div>
+              <p>Saves a <dfn class="term" title="A deleted marker saved in place of the value, so an old copy cannot bring the key back.">tombstone</dfn> instead of erasing, and cleans it up later. Deleting twice is fine.</p>
+              <div class="io">
+                <div><span class="io-l">Request body</span><pre>(none)</pre></div>
+                <div><span class="io-l">Response 204 No Content</span><pre>(empty)</pre></div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="sec" id="2026-11-10-key-value-store-sec-hld">
+          <h3>High-level design</h3>
+          <div class="reveal">
+            <p>Assume 100 million entries of about 1 KB each: 100 GB, and 20,000 requests a second at peak. One machine could hold that, but it would be a single point of failure. We start with one node, then spread out.</p>
+            <h4>1. Save, get and delete on one node</h4>
+            <p>The app servers (identical, no data of their own, behind a load balancer) pass each call to the node. A node appends every change to a log file on disk first, then updates an in-memory lookup table. After a crash it replays the log. A hash-table lookup is one step, which answers "fast". The client picks the key, so no ID generator is needed. The version is the server time in milliseconds, and the newest wins.</p>
+            <div class="table-scroll">
+              <table class="schema">
+                <caption>Per node: entries</caption>
+                <thead><tr><th>Column</th><th>Type</th><th>Note</th></tr></thead>
+                <tbody>
+                  <tr><td>key</td><td>text</td><td>primary key (hash lookup)</td></tr>
+                  <tr><td>value, version</td><td>bytes, bigint</td><td>value is null for a tombstone</td></tr>
+                </tbody>
+              </table>
+            </div>
+            <h4>2. Spread over many nodes</h4>
+            <p>We split the keys between nodes and copy each key to three of them, as the deep dives explain.</p>
+          </div>
+
+          <figure class="diagram-fig">
+            <div class="diagram-scroll" tabindex="0" role="group" aria-label="Diagram: simple key-value store on one node. Scrollable on small screens.">
+              <svg class="diagram" viewBox="0 0 760 290" role="img" aria-labelledby="2026-11-10-key-value-store-d1-t 2026-11-10-key-value-store-d1-d">
+                <title id="2026-11-10-key-value-store-d1-t">Simple key-value store</title>
+                <desc id="2026-11-10-key-value-store-d1-d">A client sends PUT and GET requests to the app servers, which save to and read from a single storage node. A sign above the node shows the entries it holds.</desc>
+                <g class="d-node grass" style="--i:0"><rect x="8" y="152" width="82" height="60"/><text class="d-text" x="49" y="187" text-anchor="middle">Client</text></g>
+                <path class="d-edge accent" style="--i:1" d="M90 182H190"/><path class="d-arrow accent" style="--i:1" d="M184 176L192 182L184 188Z"/><path class="d-arrow accent" style="--i:1" d="M96 176L88 182L96 188Z"/>
+                <text class="d-label" style="--i:1" x="140" y="172" text-anchor="middle">PUT, GET</text>
+                <g class="d-node cmd" style="--i:2"><rect x="190" y="132" width="190" height="100"/><text class="d-text" x="285" y="158" text-anchor="middle">App servers</text><text class="d-item" x="202" y="184">- check key and size</text><text class="d-item" x="202" y="204">- stamp the version</text><text class="d-item" x="202" y="224">- call the node</text></g>
+                <path class="d-edge accent" style="--i:3" d="M380 182H560"/><path class="d-arrow accent" style="--i:3" d="M554 176L562 182L554 188Z"/><path class="d-arrow accent" style="--i:3" d="M386 176L378 182L386 188Z"/>
+                <text class="d-label" style="--i:3" x="470" y="172" text-anchor="middle">save, read</text>
+                <g class="d-node chest" style="--i:3"><rect x="560" y="150" width="180" height="64"/><text class="d-text" x="650" y="178" text-anchor="middle">Storage node</text><text class="d-sub" x="650" y="198" text-anchor="middle">log + lookup table</text></g>
+                <path class="d-line" style="--i:3" d="M650 150V128"/>
+                <g class="d-note" style="--i:3"><rect x="550" y="30" width="190" height="98"/><text class="d-note-t" x="562" y="50">entries</text><text class="d-mono" x="562" y="72">key  PK</text><text class="d-mono" x="562" y="90">value, version</text><text class="d-mono" x="562" y="108">value null = deleted</text></g>
+                <rect class="d-packet" x="-6" y="-6" width="12" height="12" opacity="0"><animateMotion dur="8s" begin="1.4s" repeatCount="indefinite" keyPoints="0;1;1" keyTimes="0;.4;1" calcMode="linear" path="M90 182H560"/><animate attributeName="opacity" dur="8s" begin="1.4s" repeatCount="indefinite" values="0;1;1;0;0" keyTimes="0;.02;.38;.4;1"/></rect>
+              </svg>
+            </div>
+            <figcaption>The starting point: everything lives on one node. Gold = a request.</figcaption>
+            <button class="replay" type="button" aria-label="Replay diagram animation">Replay</button>
+          </figure>
+
+          <aside class="callout why reveal">
+            <span class="callout-label">Why</span>
+            <p><strong>Why not a normal SQL database?</strong> We only look up by key, so we need no joins or queries. Dropping them keeps every request one cheap step and makes spreading over machines easier.</p>
+          </aside>
+        </section>
+
+        <section class="sec" id="2026-11-10-key-value-store-sec-deepdives">
+          <h3>Deep dives</h3>
+          <div class="dive reveal">
+            <h4>How do we spread keys over many machines?</h4>
+            <p>Each key needs a clear owner, and adding a machine should not reshuffle everything.</p>
+            <ol class="options">
+              <li><strong>Hash, then mod by machine count.</strong> Even spread, but adding one machine moves almost every key.</li>
+              <li><strong>Ranges of keys (A-F, G-M…).</strong> Easy to read, but popular ranges overload one machine.</li>
+              <li class="pick"><strong>Hash ring.</strong><span class="pick-tag">Pick</span> Adding a machine moves only a small share of keys.</li>
+            </ol>
+            <p>On a <dfn class="term" title="A circle that machines and keys are placed on by hashing. A key belongs to the first machine clockwise from it.">hash ring</dfn>, a key goes to the first node clockwise from its hash. A new node takes over only the keys just before it. Each node sits at many points (virtual nodes, say 100) to even out the load. The services keep the ring in memory, so each call goes straight to the owner.</p>
+          </div>
+
+          <div class="dive reveal">
+            <h4>How do we stay up when a machine dies?</h4>
+            <p>A dead node must not lose keys.</p>
+            <ol class="options">
+              <li><strong>One copy per key.</strong> Simple, but data is lost when a node dies.</li>
+              <li><strong>One primary plus a backup that is promoted on failure.</strong> Reads are always fresh, but writes stall during the switch.</li>
+              <li class="pick"><strong>Three copies with a quorum.</strong><span class="pick-tag">Pick</span> Survives one dead node, and never stops.</li>
+            </ol>
+            <p>A key is copied to its owner and the next two nodes on the ring, which are its <dfn class="term" title="A copy of the data kept on another machine.">replicas</dfn>. A write goes to all three and succeeds once 2 confirm. A read asks 2 and returns the newer version. Any 2 writers and 2 readers out of 3 overlap, so a read sees the latest write. A node that missed a write is fixed when next read.</p>
+          </div>
+
+          <div class="reveal">
+            <h4>Final design</h4>
+            <p>The dives added the ring and three-way copies. Services are split by job: the Write API stamps versions and waits for 2 confirmations, while the Read API compares two copies. Reads usually outnumber writes, so the read side scales alone. An <dfn class="term" title="The single front door that sends each request to the right service.">API gateway</dfn> routes by path and method.</p>
+            <p>A <dfn class="term" title="A majority of the copies, here 2 of 3.">quorum</dfn> of 2 copes with one node down. If two of a key's nodes are down, writes to it fail with 503 rather than risk losing data. Rare stale reads are fine for settings and sessions, not for money.</p>
+          </div>
+
+          <figure class="diagram-fig" id="2026-11-10-key-value-store-final">
+            <div class="diagram-scroll" tabindex="0" role="group" aria-label="Diagram: the final key-value store design. Scrollable on small screens.">
+              <svg class="diagram" viewBox="0 0 760 400" role="img" aria-labelledby="2026-11-10-key-value-store-d2-t 2026-11-10-key-value-store-d2-d">
+                <title id="2026-11-10-key-value-store-d2-t">Final key-value store design</title>
+                <desc id="2026-11-10-key-value-store-d2-d">A client talks to an API gateway. The gateway sends PUT and DELETE on keys to the Write API and GET on a key to the Read API. The Write API sends each write to the three storage nodes that own the key and waits for two to confirm. The Read API asks two of those nodes and returns the newest version. A sign shows the entries each node holds.</desc>
+                <g class="d-node grass" style="--i:0"><rect x="8" y="130" width="82" height="60"/><text class="d-text" x="49" y="165" text-anchor="middle">Client</text></g>
+                <path class="d-edge" style="--i:1" d="M90 160H110"/><path class="d-arrow" style="--i:1" d="M104 154L112 160L104 166Z"/><path class="d-arrow" style="--i:1" d="M96 154L88 160L96 166Z"/>
+                <g class="d-node" style="--i:1"><rect x="110" y="30" width="80" height="230"/><text class="d-text" x="150" y="130" text-anchor="middle">API</text><text class="d-text" x="150" y="148" text-anchor="middle">gateway</text><text class="d-item" x="118" y="178">- one door</text><text class="d-item" x="118" y="198">- by path</text></g>
+                <path class="d-edge accent" style="--i:2" d="M190 80H320"/><path class="d-arrow accent" style="--i:2" d="M314 74L322 80L314 86Z"/><path class="d-arrow accent" style="--i:2" d="M196 74L188 80L196 86Z"/>
+                <text class="d-label" style="--i:2" x="255" y="62" text-anchor="middle">PUT /keys/{k}</text>
+                <text class="d-label" style="--i:2" x="255" y="102" text-anchor="middle">DELETE /keys/{k}</text>
+                <g class="d-node cmd" style="--i:2"><rect x="320" y="30" width="170" height="100"/><text class="d-text" x="405" y="56" text-anchor="middle">Write API</text><text class="d-item" x="332" y="82">- find 3 owners (ring)</text><text class="d-item" x="332" y="102">- stamp the version</text><text class="d-item" x="332" y="122">- wait for 2 acks</text></g>
+                <path class="d-edge" style="--i:3" d="M190 200H320"/><path class="d-arrow" style="--i:3" d="M314 194L322 200L314 206Z"/><path class="d-arrow" style="--i:3" d="M196 194L188 200L196 206Z"/>
+                <text class="d-label" style="--i:3" x="255" y="190" text-anchor="middle">GET /keys/{k}</text>
+                <g class="d-node cmd" style="--i:3"><rect x="320" y="160" width="170" height="100"/><text class="d-text" x="405" y="186" text-anchor="middle">Read API</text><text class="d-item" x="332" y="212">- find 3 owners (ring)</text><text class="d-item" x="332" y="232">- ask 2, keep newest</text><text class="d-item" x="332" y="252">- fix any stale copy</text></g>
+                <g class="d-node chest" style="--i:4"><rect x="590" y="30" width="160" height="230"/><text class="d-text" x="670" y="60" text-anchor="middle">Storage</text><text class="d-text" x="670" y="78" text-anchor="middle">nodes</text><text class="d-sub" x="670" y="102" text-anchor="middle">3 copies per key</text><text class="d-item" x="600" y="132">- log, then table</text><text class="d-item" x="600" y="152">- ring owner plus</text><text class="d-item" x="610" y="172">next two nodes</text></g>
+                <path class="d-edge accent" style="--i:4" d="M490 80H590"/><path class="d-arrow accent" style="--i:4" d="M584 74L592 80L584 86Z"/><path class="d-arrow accent" style="--i:4" d="M496 74L488 80L496 86Z"/>
+                <text class="d-label" style="--i:4" x="540" y="70" text-anchor="middle">write x3</text>
+                <path class="d-edge" style="--i:5" d="M490 200H590"/><path class="d-arrow" style="--i:5" d="M584 194L592 200L584 206Z"/><path class="d-arrow" style="--i:5" d="M496 194L488 200L496 206Z"/>
+                <text class="d-label" style="--i:5" x="540" y="190" text-anchor="middle">read x2</text>
+                <path class="d-line" style="--i:4" d="M670 260V290"/>
+                <g class="d-note" style="--i:4"><rect x="560" y="290" width="190" height="90"/><text class="d-note-t" x="572" y="310">entries (per node)</text><text class="d-mono" x="572" y="332">key  PK</text><text class="d-mono" x="572" y="350">value, version</text><text class="d-mono" x="572" y="368">value null = deleted</text></g>
+                <rect class="d-packet" x="-6" y="-6" width="12" height="12" opacity="0"><animateMotion dur="8s" begin="1.6s" repeatCount="indefinite" keyPoints="0;1;1" keyTimes="0;.25;1" calcMode="linear" path="M90 160H150V80H590"/><animate attributeName="opacity" dur="8s" begin="1.6s" repeatCount="indefinite" values="0;1;1;0;0" keyTimes="0;.02;.23;.25;1"/></rect>
+                <rect class="d-packet alt" x="-6" y="-6" width="12" height="12" opacity="0"><animateMotion dur="8s" begin="1.6s" repeatCount="indefinite" keyPoints="0;0;1;1" keyTimes="0;.4;.65;1" calcMode="linear" path="M90 160H150V200H590"/><animate attributeName="opacity" dur="8s" begin="1.6s" repeatCount="indefinite" values="0;0;1;1;0;0" keyTimes="0;.4;.41;.64;.65;1"/></rect>
+              </svg>
+            </div>
+            <figcaption>The complete system: a gateway in front of a write service and a read service, both sending requests straight to the nodes that own the key. Gold = a write, cyan = a read.</figcaption>
+            <button class="replay" type="button" aria-label="Replay diagram animation">Replay</button>
+          </figure>
+
+          <div class="next reveal">
+            <h4>What you could add next</h4>
+            <ul class="next-list">
+              <li>A background repair job that compares copies and fixes differences.</li>
+              <li>A key expiry (TTL) so old entries delete themselves.</li>
+              <li>A small cache in front of very popular keys.</li>
+            </ul>
+          </div>
+        </section>
+
+        <section class="sec reveal" id="2026-11-10-key-value-store-sec-tips">
+          <h3>Interview tips</h3>
+          <dl class="qa">
+            <div><dt>What if a node is down during a write?</dt><dd>The other two confirm and the write succeeds. The missed node is fixed later.</dd></div>
+            <div><dt>How do two writes to one key get ordered?</dt><dd>By version, newest wins. Clocks can drift, so some systems use vector clocks.</dd></div>
+            <div><dt>How do you add a node?</dt><dd>Put it on the ring. It copies its share of keys from its neighbours, and only those keys move.</dd></div>
+          </dl>
+          <h4>Common mistakes</h4>
+          <ul class="mistakes">
+            <li>Using hash mod N, so adding a node moves almost every key.</li>
+            <li>Erasing a deleted key instead of saving a tombstone, so an old copy brings it back.</li>
+          </ul>
+          <aside class="callout tip">
+            <span class="callout-label">Interview tip</span>
+            <p>State the trade-off aloud: we chose availability, so reads may be slightly stale.</p>
+          </aside>
+          <aside class="callout confidence">
+            <span class="callout-label">Confidence note</span>
+            <p>The traffic, value limit and 100 virtual nodes are assumptions. Strict consistency (one primary per key) is also a valid answer, and it fits when stale reads are not acceptable.</p>
+          </aside>
+        </section>
+
+        <p class="sources">Sources: DeCandia et al., <a href="https://www.allthingsdistributed.com/files/amazon-dynamo-sosp2007.pdf">Dynamo: Amazon's Highly Available Key-value Store</a> (a published design, not a claim about today's systems); Alex Xu, <em>System Design Interview</em>, chapter "Design a Key-Value Store"; Hello Interview's system design delivery framework.</p>
+      </div>
+    </article>
     <article class="entry" id="2026-11-09-job-scheduler" data-topic="Job scheduler" data-domain="Queues &amp; async jobs" data-date="2026-11-09" data-level="2">
       <header class="entry-head">
         <div class="entry-meta">
