@@ -420,6 +420,7 @@ dfn.term{font-style:normal;border-bottom:2px dotted var(--accent);cursor:help}
       <h2><svg viewBox="0 0 12 12" aria-hidden="true"><path fill="#7A4A2A" d="M0 2h12v9H0z"/><path fill="#A86A3C" d="M1 3h10v3H1zM1 7h10v3H1z"/><path fill="#E9B526" d="M5 5h2v3H5z"/><path fill="#4A2C18" d="M0 6h5v1H0zM7 6h5v1H7z"/></svg>Archive</h2>
       <ol class="toc">
         <!-- TOC -->
+        <li><a href="#2026-11-12-ride-hailing"><time datetime="2026-11-12">2026-11-12</time><span>Ride hailing: a live driver map, and one ride per driver</span></a></li>
         <li><a href="#2026-11-11-file-sync"><time datetime="2026-11-11">2026-11-11</time><span>File sync: send only the changed pieces, straight to storage</span></a></li>
         <li><a href="#2026-11-10-key-value-store"><time datetime="2026-11-10">2026-11-10</time><span>Key-value store: spread keys on a ring, keep three copies</span></a></li>
         <li><a href="#2026-11-09-job-scheduler"><time datetime="2026-11-09">2026-11-09</time><span>Job scheduler: due jobs go on a queue, so none are lost</span></a></li>
@@ -443,6 +444,294 @@ dfn.term{font-style:normal;border-bottom:2px dotted var(--accent);cursor:help}
 
   <main id="entries" tabindex="-1">
     <!-- ENTRIES -->
+    <article class="entry" id="2026-11-12-ride-hailing" data-topic="Ride hailing" data-domain="Geo &amp; location" data-date="2026-11-12" data-level="3">
+      <header class="entry-head">
+        <div class="entry-meta">
+          <span class="chip">Geo &amp; location</span>
+          <span class="level" title="Difficulty: level 3 of 3">Lv 3</span>
+          <time datetime="2026-11-12">12 Nov 2026</time>
+          <span class="read"><span class="read-time">4</span> min read</span>
+        </div>
+        <h2 class="entry-title">Design a ride-hailing service (Uber-style)</h2>
+        <p class="lede">You tap "Ride" and a driver a few streets away accepts within seconds. The interview asks how to track thousands of moving drivers, and how to give each ride to exactly one of them.</p>
+        <nav class="steps" aria-label="Sections of this design">
+          <a href="#2026-11-12-ride-hailing-sec-functional">Features</a>
+          <a href="#2026-11-12-ride-hailing-sec-nonfunctional">Qualities</a>
+          <a href="#2026-11-12-ride-hailing-sec-entities">Entities</a>
+          <a href="#2026-11-12-ride-hailing-sec-api">API</a>
+          <a href="#2026-11-12-ride-hailing-sec-hld">Design</a>
+          <a href="#2026-11-12-ride-hailing-sec-deepdives">Deep dives</a>
+          <a href="#2026-11-12-ride-hailing-sec-tips">Tips</a>
+        </nav>
+      </header>
+
+      <div class="prose">
+        <details class="legend">
+          <summary>Legend <span class="hint">6 terms used below</span></summary>
+          <dl>
+            <div><dt>Queue</dt><dd>A waiting line of jobs. One part adds jobs, another takes them off one by one.</dd></div>
+            <div><dt>Geo index</dt><dd>A store that keeps points on a map in a grid, so "who is within 3 km of here?" does not check every point.</dd></div>
+            <div><dt>TTL</dt><dd>"Time to live". A stored value that deletes itself after that many seconds.</dd></div>
+            <div><dt>Lock</dt><dd>A marker that lets only one caller act on something at a time.</dd></div>
+            <div><dt>WebSocket</dt><dd>A connection that stays open, so the server can send news to the phone at any moment.</dd></div>
+            <div><dt>API gateway</dt><dd>The single front door of a system. It sends each request to the right service.</dd></div>
+          </dl>
+        </details>
+
+        <section class="sec reveal" id="2026-11-12-ride-hailing-sec-functional">
+          <h3>Functional requirements</h3>
+          <ul class="reqs">
+            <li>A rider requests a ride from a pickup point to a destination.</li>
+            <li>A nearby driver is offered the ride and accepts or passes.</li>
+            <li>Drivers share their location while they are online.</li>
+          </ul>
+          <p class="out">Out of scope: payments, pricing, ratings, ride sharing.</p>
+        </section>
+
+        <section class="sec reveal" id="2026-11-12-ride-hailing-sec-nonfunctional">
+          <h3>Non-functional requirements</h3>
+          <ul class="reqs nfr">
+            <li><strong>Fast nearby search.</strong> A rider is waiting.</li>
+            <li><strong>One driver, one ride.</strong> Two riders for one driver is the worst bug.</li>
+            <li><strong>Heavy location traffic.</strong> Assume 500,000 drivers each send a position every 5 seconds: 100,000 writes a second.</li>
+            <li><strong>Instant offers.</strong> A driver has about 10 seconds to say yes.</li>
+          </ul>
+        </section>
+
+        <section class="sec reveal" id="2026-11-12-ride-hailing-sec-entities">
+          <h3>Core entities</h3>
+          <ul class="entities">
+            <li><strong>Driver:</strong> an id, free or busy, and the latest position.</li>
+            <li><strong>Ride:</strong> rider, driver, pickup, destination and a status such as matching or accepted.</li>
+          </ul>
+        </section>
+
+        <section class="sec reveal" id="2026-11-12-ride-hailing-sec-api">
+          <h3>API design</h3>
+          <div class="api-list">
+            <div class="api">
+              <div class="api-sig"><span class="method put">PUT</span><code>/drivers/me/location</code></div>
+              <p>Sent every 5 seconds. It replaces the old position.</p>
+              <div class="io">
+                <div><span class="io-l">Request body</span><pre>{ "lat": 12.97, "lng": 77.59 }</pre></div>
+                <div><span class="io-l">Response 204 No Content</span><pre>(empty)</pre></div>
+              </div>
+            </div>
+            <div class="api">
+              <div class="api-sig"><span class="method">POST</span><code>/rides</code></div>
+              <p>Asks for a ride; matching happens after. 409 if the rider already has an open ride.</p>
+              <div class="io">
+                <div><span class="io-l">Request body</span><pre>{ "pickup": { "lat": 12.97, "lng": 77.59 },
+  "destination": { "lat": 12.93, "lng": 77.62 } }</pre></div>
+                <div><span class="io-l">Response 201 Created</span><pre>{ "ride_id": "r_5d2",
+  "status": "matching" }</pre></div>
+              </div>
+            </div>
+            <div class="api">
+              <div class="api-sig"><span class="method">POST</span><code>/rides/{id}/accept</code></div>
+              <p>The offered driver says yes. 409 if the offer expired or the ride is taken.</p>
+              <div class="io">
+                <div><span class="io-l">Request body</span><pre>(none)</pre></div>
+                <div><span class="io-l">Response 200 OK</span><pre>{ "ride_id": "r_5d2",
+  "status": "accepted",
+  "pickup": { "lat": 12.97, "lng": 77.59 } }</pre></div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="sec" id="2026-11-12-ride-hailing-sec-hld">
+          <h3>High-level design</h3>
+          <div class="reveal">
+            <p>Rides are rare: say 1 million a day, about 12 a second, which one database handles. The 100,000 position writes a second do not belong in it. Servers are identical, keep no data, and sit behind a load balancer.</p>
+            <h4>1. Share location</h4>
+            <p>We keep only the latest position per driver, in memory, overwritten each time.</p>
+            <h4>2. Request a ride</h4>
+            <p>We save a ride row with status <code>matching</code>, put the ride on a <dfn class="term" title="A waiting line of jobs. One part adds jobs, another takes them off one by one.">queue</dfn>, and answer 201. Matching can take a minute, so it must not hold the request open. Ride IDs are random UUIDs.</p>
+            <h4>3. Match a driver</h4>
+            <p>A matcher takes a ride off the queue and asks a <dfn class="term" title="A store that keeps points on a map in a grid, so finding what is near a spot does not check every point.">geo index</dfn> for free drivers near the pickup, nearest first. It offers the ride to one driver at a time, for 10 seconds each. On accept, one guarded update changes the ride to <code>accepted</code> only if it is still <code>matching</code>; anyone later gets 409.</p>
+            <div class="table-scroll">
+              <table class="schema">
+                <caption>Table: rides</caption>
+                <thead><tr><th>Column</th><th>Type</th><th>Note</th></tr></thead>
+                <tbody>
+                  <tr><td>ride_id</td><td>uuid</td><td>primary key</td></tr>
+                  <tr><td>rider_id, driver_id</td><td>bigint</td><td>driver is empty until accepted</td></tr>
+                  <tr><td>status</td><td>text</td><td>matching, accepted, done, no_driver</td></tr>
+                  <tr><td>pickup, destination</td><td>lat/lng pairs</td><td>copied from the request</td></tr>
+                  <tr><td>rider_id + status</td><td>index</td><td>finds a rider's open ride for the 409 check</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <figure class="diagram-fig">
+            <div class="diagram-scroll" tabindex="0" role="group" aria-label="Diagram: simple ride hailing. Scrollable on small screens.">
+              <svg class="diagram" viewBox="0 0 760 490" role="img" aria-labelledby="2026-11-12-ride-hailing-d1-t 2026-11-12-ride-hailing-d1-d">
+                <title id="2026-11-12-ride-hailing-d1-t">Simple ride hailing</title>
+                <desc id="2026-11-12-ride-hailing-d1-d">The rider and driver apps send requests to the app servers. The servers save and search driver positions in a location store held in memory, and save ride rows in a rides database. A sign above the location store lists its keys and a sign below the rides database lists its fields.</desc>
+                <g class="d-node grass" style="--i:0"><rect x="8" y="150" width="82" height="60"/><text class="d-text" x="49" y="185" text-anchor="middle">Apps</text></g>
+                <path class="d-edge accent" style="--i:1" d="M90 180H190"/><path class="d-arrow accent" style="--i:1" d="M184 174L192 180L184 186Z"/><path class="d-arrow accent" style="--i:1" d="M96 174L88 180L96 186Z"/>
+                <text class="d-label" style="--i:1" x="140" y="170" text-anchor="middle">requests</text>
+                <g class="d-node cmd" style="--i:2"><rect x="190" y="110" width="190" height="140"/><text class="d-text" x="285" y="136" text-anchor="middle">App servers</text><text class="d-item" x="202" y="164">- save driver spots</text><text class="d-item" x="202" y="184">- save new rides</text><text class="d-item" x="202" y="204">- find drivers near</text><text class="d-item" x="202" y="224">- offer to a driver</text></g>
+                <path class="d-edge alt" style="--i:3" d="M380 142H560"/><path class="d-arrow alt" style="--i:3" d="M554 136L562 142L554 148Z"/><path class="d-arrow alt" style="--i:3" d="M386 136L378 142L386 148Z"/>
+                <text class="d-label" style="--i:3" x="470" y="132" text-anchor="middle">save spot, search</text>
+                <g class="d-node gem" style="--i:3"><rect x="560" y="110" width="180" height="64"/><text class="d-text" x="650" y="138" text-anchor="middle">Location store</text><text class="d-sub" x="650" y="158" text-anchor="middle">latest spots, in RAM</text></g>
+                <path class="d-line" style="--i:3" d="M650 110V98"/>
+                <g class="d-note" style="--i:3"><rect x="550" y="6" width="190" height="92"/><text class="d-note-t" x="562" y="26">location store</text><text class="d-mono" x="562" y="48">geo:{city}  points</text><text class="d-mono" x="562" y="66">driver_id -> lat,lng</text><text class="d-mono" x="562" y="84">driver:{id}  TTL 15 s</text></g>
+                <path class="d-edge accent" style="--i:4" d="M380 232H470V332H560"/><path class="d-arrow accent" style="--i:4" d="M554 326L562 332L554 338Z"/><path class="d-arrow accent" style="--i:4" d="M386 226L378 232L386 238Z"/>
+                <text class="d-label" style="--i:4" x="480" y="322">save ride</text>
+                <g class="d-node chest" style="--i:4"><rect x="560" y="300" width="180" height="64"/><text class="d-text" x="650" y="328" text-anchor="middle">Rides DB</text><text class="d-sub" x="650" y="348" text-anchor="middle">one row per ride</text></g>
+                <path class="d-line" style="--i:4" d="M650 364V384"/>
+                <g class="d-note" style="--i:4"><rect x="550" y="384" width="190" height="92"/><text class="d-note-t" x="562" y="404">rides table</text><text class="d-mono" x="562" y="426">ride_id  PK</text><text class="d-mono" x="562" y="444">rider_id, driver_id</text><text class="d-mono" x="562" y="462">status, pickup</text></g>
+                <rect class="d-packet" x="-6" y="-6" width="12" height="12" opacity="0"><animateMotion dur="8s" begin="1.4s" repeatCount="indefinite" keyPoints="0;1;1" keyTimes="0;.4;1" calcMode="linear" path="M90 180H285V232H470V332H560"/><animate attributeName="opacity" dur="8s" begin="1.4s" repeatCount="indefinite" values="0;1;1;0;0" keyTimes="0;.02;.38;.4;1"/></rect>
+                <rect class="d-packet alt" x="-6" y="-6" width="12" height="12" opacity="0"><animateMotion dur="8s" begin="1.4s" repeatCount="indefinite" keyPoints="0;0;1;1" keyTimes="0;.4;.65;1" calcMode="linear" path="M90 180H285V142H560"/><animate attributeName="opacity" dur="8s" begin="1.4s" repeatCount="indefinite" values="0;0;1;1;0;0" keyTimes="0;.4;.41;.64;.65;1"/></rect>
+              </svg>
+            </div>
+            <figcaption>The starting point: ride rows go to a database, driver positions to a fast in-memory store. Gold = a new ride, cyan = a driver spot or a search.</figcaption>
+            <button class="replay" type="button" aria-label="Replay diagram animation">Replay</button>
+          </figure>
+
+          <aside class="callout why reveal">
+            <span class="callout-label">Why</span>
+            <p><strong>Why offer to one driver at a time?</strong> Asking ten drivers at once starts a race, and nine hear "too late". One by one is fair and simple, at the cost of a few seconds when drivers pass.</p>
+          </aside>
+        </section>
+
+        <section class="sec" id="2026-11-12-ride-hailing-sec-deepdives">
+          <h3>Deep dives</h3>
+          <div class="dive reveal">
+            <h4>How do we find nearby drivers fast?</h4>
+            <p>500,000 drivers keep moving.</p>
+            <ol class="options">
+              <li><strong>Scan the database.</strong> Checks every driver, and the writes would swamp it.</li>
+              <li><strong>Index latitude and longitude columns.</strong> Narrows one direction only.</li>
+              <li class="pick"><strong>Geo index in memory.</strong><span class="pick-tag">Pick</span> Grid cells make "within 3 km" fast, and memory keeps up.</li>
+            </ol>
+            <p>Redis has geo commands for this: one index per city, which also splits the load. Each driver also has a key with a <dfn class="term" title="Time to live: a stored value that deletes itself after that many seconds.">TTL</dfn> of 15 seconds, refreshed on every ping. A quiet phone fails that check and is skipped.</p>
+          </div>
+
+          <div class="dive reveal">
+            <h4>How do we give one driver only one ride?</h4>
+            <p>Two matchers may pick the same free driver at the same moment.</p>
+            <ol class="options">
+              <li><strong>Check "free", then offer.</strong> Both matchers see "free", so both offer.</li>
+              <li><strong>Lock the driver's database row.</strong> Safe, but holds a connection for 10 seconds.</li>
+              <li class="pick"><strong>A short lock with a TTL.</strong><span class="pick-tag">Pick</span> One matcher wins, and it clears itself.</li>
+            </ol>
+            <p>Before offering, the matcher sets <code>offer:{driver}</code> only if it does not exist, with a 10-second TTL, so only one matcher wins. If the driver ignores the offer or the matcher crashes, the <dfn class="term" title="A marker that lets only one caller act on something at a time.">lock</dfn> expires. On accept the driver is marked busy.</p>
+          </div>
+
+          <div class="dive reveal">
+            <h4>How does an offer reach a phone in time?</h4>
+            <p>Offers and rider updates must arrive in about a second.</p>
+            <ol class="options">
+              <li><strong>Phones poll every 2 seconds.</strong> 250,000 mostly empty requests a second.</li>
+              <li><strong>Push notifications.</strong> Delivery time is not guaranteed.</li>
+              <li class="pick"><strong>WebSocket.</strong><span class="pick-tag">Pick</span> Instant, and it works both ways.</li>
+            </ol>
+            <p>Apps keep a <dfn class="term" title="A connection that stays open, so the server can send news to the phone at any moment.">WebSocket</dfn> open to a Realtime service. With many servers, the matcher publishes the offer on a channel named for the driver, and the server holding their connection delivers it. A lost message just means the offer expires.</p>
+          </div>
+
+          <div class="reveal">
+            <h4>Final design</h4>
+            <p>The dives added the location store, the offer lock and a Realtime service. Location writes, ride creation and open sockets have very different loads, so each service scales alone. An <dfn class="term" title="The single front door that sends each request to the right service.">API gateway</dfn> routes by path.</p>
+            <p>Positions may be a few seconds stale; who owns a ride may not, so it comes from the primary database, whose replica takes over on failure. If the location store fails, its replica takes over and drivers refill it within 5 seconds. If the queue is down, new rides get 503 and riders retry.</p>
+          </div>
+
+          <figure class="diagram-fig" id="2026-11-12-ride-hailing-final">
+            <div class="diagram-scroll" tabindex="0" role="group" aria-label="Diagram: the final ride hailing design. Scrollable on small screens.">
+              <svg class="diagram" viewBox="0 0 760 900" role="img" aria-labelledby="2026-11-12-ride-hailing-d2-t 2026-11-12-ride-hailing-d2-d">
+                <title id="2026-11-12-ride-hailing-d2-t">Final ride hailing design</title>
+                <desc id="2026-11-12-ride-hailing-d2-d">The apps talk to an API gateway. The gateway sends POST rides to the Ride service, POST accept to the Matching service, PUT location to the Location service, and WebSocket connections to the Realtime service. The Ride service saves ride rows in the rides database and puts rides on the match queue. The Matching service takes rides from the queue, reads and updates the rides database, and searches, locks and publishes offers in the location store. The Location service saves driver spots in the location store. The Realtime service listens for offers on the location store. Signs show the rides table, the queue message and the location store keys.</desc>
+                <g class="d-node grass" style="--i:0"><rect x="4" y="420" width="66" height="60"/><text class="d-text" x="37" y="455" text-anchor="middle">Apps</text></g>
+                <path class="d-edge accent" style="--i:1" d="M70 450H88"/><path class="d-arrow accent" style="--i:1" d="M82 444L90 450L82 456Z"/><path class="d-arrow accent" style="--i:1" d="M76 444L68 450L76 456Z"/>
+                <g class="d-node" style="--i:1"><rect x="88" y="138" width="72" height="636"/><text class="d-text" x="124" y="440" text-anchor="middle">API</text><text class="d-text" x="124" y="458" text-anchor="middle">gateway</text><text class="d-item" x="94" y="484">- one door</text><text class="d-item" x="94" y="504">- by path</text></g>
+
+                <path class="d-edge accent" style="--i:2" d="M160 170H288"/><path class="d-arrow accent" style="--i:2" d="M282 164L290 170L282 176Z"/><path class="d-arrow accent" style="--i:2" d="M166 164L158 170L166 176Z"/>
+                <text class="d-label" style="--i:2" x="224" y="160" text-anchor="middle">POST /rides</text>
+                <g class="d-node cmd" style="--i:2"><rect x="288" y="138" width="170" height="104"/><text class="d-text" x="373" y="164" text-anchor="middle">Ride service</text><text class="d-item" x="300" y="190">- save the ride row</text><text class="d-item" x="300" y="210">- queue it to match</text><text class="d-item" x="300" y="230">- 409 if one is open</text></g>
+                <path class="d-edge accent" style="--i:3" d="M458 170H610"/><path class="d-arrow accent" style="--i:3" d="M604 164L612 170L604 176Z"/><path class="d-arrow accent" style="--i:3" d="M464 164L456 170L464 176Z"/>
+                <text class="d-label" style="--i:3" x="534" y="160" text-anchor="middle">save ride</text>
+
+                <path class="d-edge accent" style="--i:4" d="M373 242V282"/><path class="d-arrow accent" style="--i:4" d="M367 276L373 284L379 276Z"/>
+                <text class="d-label" style="--i:4" x="381" y="266">to match</text>
+                <g class="d-node furnace" style="--i:4"><rect x="288" y="282" width="170" height="56"/><text class="d-text" x="373" y="308" text-anchor="middle">Match queue</text><text class="d-sub" x="373" y="326" text-anchor="middle">rides to match</text></g>
+                <path class="d-line" style="--i:4" d="M458 310H468"/>
+                <g class="d-note" style="--i:4"><rect x="468" y="270" width="130" height="82"/><text class="d-note-t" x="478" y="290">match queue</text><text class="d-mono" x="478" y="312">ride_id, pickup</text><text class="d-mono" x="478" y="330">1 msg per ride</text></g>
+                <path class="d-edge accent" style="--i:5" d="M373 338V378"/><path class="d-arrow accent" style="--i:5" d="M367 372L373 380L379 372Z"/>
+                <text class="d-label" style="--i:5" x="381" y="362">next ride</text>
+
+                <path class="d-edge" style="--i:6" d="M160 420H288"/><path class="d-arrow" style="--i:6" d="M282 414L290 420L282 426Z"/><path class="d-arrow" style="--i:6" d="M166 414L158 420L166 426Z"/>
+                <text class="d-label" style="--i:6" x="224" y="410" text-anchor="middle">POST .../accept</text>
+                <g class="d-node cmd" style="--i:6"><rect x="288" y="378" width="170" height="126"/><text class="d-text" x="373" y="404" text-anchor="middle">Matching</text><text class="d-item" x="300" y="430">- find free drivers</text><text class="d-item" x="300" y="450">- lock one, offer it</text><text class="d-item" x="300" y="470">- wait 10 s for yes</text><text class="d-item" x="300" y="490">- first accept wins</text></g>
+                <path class="d-edge" style="--i:7" d="M458 400H610"/><path class="d-arrow" style="--i:7" d="M604 394L612 400L604 406Z"/><path class="d-arrow" style="--i:7" d="M464 394L456 400L464 406Z"/>
+                <text class="d-label" style="--i:7" x="534" y="390" text-anchor="middle">read, mark accepted</text>
+                <path class="d-edge alt" style="--i:8" d="M458 480H610"/><path class="d-arrow alt" style="--i:8" d="M604 474L612 480L604 486Z"/><path class="d-arrow alt" style="--i:8" d="M464 474L456 480L464 486Z"/>
+                <text class="d-label" style="--i:8" x="534" y="470" text-anchor="middle">find, lock, publish</text>
+
+                <path class="d-edge alt" style="--i:9" d="M160 585H288"/><path class="d-arrow alt" style="--i:9" d="M282 579L290 585L282 591Z"/><path class="d-arrow alt" style="--i:9" d="M166 579L158 585L166 591Z"/>
+                <text class="d-label" style="--i:9" x="224" y="575" text-anchor="middle">PUT .../location</text>
+                <g class="d-node cmd" style="--i:9"><rect x="288" y="544" width="170" height="82"/><text class="d-text" x="373" y="570" text-anchor="middle">Location svc</text><text class="d-item" x="300" y="596">- save the latest spot</text><text class="d-item" x="300" y="616">- refresh last seen</text></g>
+                <path class="d-edge alt" style="--i:10" d="M458 585H610"/><path class="d-arrow alt" style="--i:10" d="M604 579L612 585L604 591Z"/>
+                <text class="d-label" style="--i:10" x="534" y="575" text-anchor="middle">save spot</text>
+
+                <path class="d-edge" style="--i:11" d="M160 720H288"/><path class="d-arrow" style="--i:11" d="M282 714L290 720L282 726Z"/><path class="d-arrow" style="--i:11" d="M166 714L158 720L166 726Z"/>
+                <text class="d-label" style="--i:11" x="224" y="710" text-anchor="middle">WebSocket</text>
+                <g class="d-node cmd" style="--i:11"><rect x="288" y="666" width="170" height="108"/><text class="d-text" x="373" y="692" text-anchor="middle">Realtime</text><text class="d-item" x="300" y="718">- hold app sockets</text><text class="d-item" x="300" y="738">- push offers, status</text><text class="d-item" x="300" y="758">- listen per driver</text></g>
+                <path class="d-edge" style="--i:12" d="M458 720H610"/><path class="d-arrow" style="--i:12" d="M464 714L456 720L464 726Z"/><path class="d-arrow" style="--i:12" d="M604 714L612 720L604 726Z"/>
+                <text class="d-label" style="--i:12" x="534" y="710" text-anchor="middle">offers (pub/sub)</text>
+
+                <path class="d-line" style="--i:3" d="M680 122V138"/>
+                <g class="d-note" style="--i:3"><rect x="560" y="10" width="190" height="112"/><text class="d-note-t" x="572" y="30">rides table</text><text class="d-mono" x="572" y="52">ride_id  PK</text><text class="d-mono" x="572" y="70">rider_id, driver_id</text><text class="d-mono" x="572" y="88">status, pickup</text><text class="d-mono" x="572" y="106">idx rider_id+status</text></g>
+                <g class="d-node chest" style="--i:3"><rect x="610" y="138" width="140" height="292"/><text class="d-text" x="680" y="168" text-anchor="middle">Rides DB</text><text class="d-item" x="620" y="200">- row per ride</text><text class="d-item" x="620" y="220">- has a replica</text><text class="d-item" x="620" y="240">- fails over</text></g>
+                <g class="d-node gem" style="--i:8"><rect x="610" y="450" width="140" height="310"/><text class="d-text" x="680" y="480" text-anchor="middle">Location</text><text class="d-text" x="680" y="498" text-anchor="middle">store</text><text class="d-item" x="620" y="530">- driver spots</text><text class="d-item" x="620" y="550">- free or busy</text><text class="d-item" x="620" y="570">- offer locks</text><text class="d-item" x="620" y="590">- pub/sub</text><text class="d-item" x="620" y="610">- has a replica</text></g>
+                <path class="d-line" style="--i:8" d="M680 760V780"/>
+                <g class="d-note" style="--i:8"><rect x="560" y="780" width="190" height="112"/><text class="d-note-t" x="572" y="800">location store</text><text class="d-mono" x="572" y="822">geo:{city}  points</text><text class="d-mono" x="572" y="840">driver:{id}  TTL 15 s</text><text class="d-mono" x="572" y="858">offer:{id}  TTL 10 s</text><text class="d-mono" x="572" y="876">chan:{id}  offers</text></g>
+
+                <rect class="d-packet" x="-6" y="-6" width="12" height="12" opacity="0"><animateMotion dur="8s" begin="1.6s" repeatCount="indefinite" keyPoints="0;1;1" keyTimes="0;.3;1" calcMode="linear" path="M70 450H124V170H373V282"/><animate attributeName="opacity" dur="8s" begin="1.6s" repeatCount="indefinite" values="0;1;1;0;0" keyTimes="0;.02;.28;.3;1"/></rect>
+                <rect class="d-packet alt" x="-6" y="-6" width="12" height="12" opacity="0"><animateMotion dur="8s" begin="1.6s" repeatCount="indefinite" keyPoints="0;0;1;1" keyTimes="0;.4;.7;1" calcMode="linear" path="M70 450H124V585H610"/><animate attributeName="opacity" dur="8s" begin="1.6s" repeatCount="indefinite" values="0;0;1;1;0;0" keyTimes="0;.4;.41;.69;.7;1"/></rect>
+              </svg>
+            </div>
+            <figcaption>The complete system. Gold = a rider's request being saved and queued, cyan = a driver's location update. Offers and updates reach phones over WebSockets.</figcaption>
+            <button class="replay" type="button" aria-label="Replay diagram animation">Replay</button>
+          </figure>
+
+          <div class="next reveal">
+            <h4>What you could add next</h4>
+            <ul class="next-list">
+              <li>Arrival times from road maps, not straight lines.</li>
+              <li>Surge pricing from live demand per area.</li>
+              <li>Trip history in cheap long-term storage.</li>
+            </ul>
+          </div>
+        </section>
+
+        <section class="sec reveal" id="2026-11-12-ride-hailing-sec-tips">
+          <h3>Interview tips</h3>
+          <dl class="qa">
+            <div><dt>A driver's phone loses signal?</dt><dd>Their 15-second key expires, so searches skip them.</dd></div>
+            <div><dt>Why not keep positions in the main database?</dt><dd>100,000 writes a second, and only the latest position matters.</dd></div>
+            <div><dt>Nobody accepts?</dt><dd>Try the next driver, widen the radius, then mark it <code>no_driver</code>.</dd></div>
+          </dl>
+          <h4>Common mistakes</h4>
+          <ul class="mistakes">
+            <li>Scanning every driver for each search.</li>
+            <li>Ignoring the double-booking race.</li>
+          </ul>
+          <aside class="callout tip">
+            <span class="callout-label">Interview tip</span>
+            <p>Name the double-booking race, then show the short lock and guarded update.</p>
+          </aside>
+          <aside class="callout confidence">
+            <span class="callout-label">Confidence note</span>
+            <p>Driver counts, 5-second pings, the 3 km radius and the timers are assumptions. Quadtrees and offering to several drivers at once are also valid.</p>
+          </aside>
+        </section>
+
+        <p class="sources">Sources: Hello Interview's <a href="https://www.hellointerview.com/learn/system-design/problem-breakdowns/uber">Uber breakdown</a> and delivery framework; Alex Xu, <em>System Design Interview Vol. 2</em>, chapter "Proximity Service"; Redis docs, <a href="https://redis.io/docs/latest/commands/geosearch/">GEOSEARCH</a> and <a href="https://redis.io/docs/latest/commands/set/">SET</a>. This is a common approach, not a claim about any company's internals.</p>
+      </div>
+    </article>
     <article class="entry" id="2026-11-11-file-sync" data-topic="File sync" data-domain="Media &amp; files" data-date="2026-11-11" data-level="3">
       <header class="entry-head">
         <div class="entry-meta">
