@@ -420,6 +420,7 @@ dfn.term{font-style:normal;border-bottom:2px dotted var(--accent);cursor:help}
       <h2><svg viewBox="0 0 12 12" aria-hidden="true"><path fill="#7A4A2A" d="M0 2h12v9H0z"/><path fill="#A86A3C" d="M1 3h10v3H1zM1 7h10v3H1z"/><path fill="#E9B526" d="M5 5h2v3H5z"/><path fill="#4A2C18" d="M0 6h5v1H0zM7 6h5v1H7z"/></svg>Archive</h2>
       <ol class="toc">
         <!-- TOC -->
+        <li><a href="#2026-11-13-ticket-booking"><time datetime="2026-11-13">2026-11-13</time><span>Ticket booking: hold the seat first, sell it once</span></a></li>
         <li><a href="#2026-11-12-ride-hailing"><time datetime="2026-11-12">2026-11-12</time><span>Ride hailing: a live driver map, and one ride per driver</span></a></li>
         <li><a href="#2026-11-11-file-sync"><time datetime="2026-11-11">2026-11-11</time><span>File sync: send only the changed pieces, straight to storage</span></a></li>
         <li><a href="#2026-11-10-key-value-store"><time datetime="2026-11-10">2026-11-10</time><span>Key-value store: spread keys on a ring, keep three copies</span></a></li>
@@ -444,6 +445,290 @@ dfn.term{font-style:normal;border-bottom:2px dotted var(--accent);cursor:help}
 
   <main id="entries" tabindex="-1">
     <!-- ENTRIES -->
+    <article class="entry" id="2026-11-13-ticket-booking" data-topic="Ticket booking" data-domain="Counters &amp; limits" data-date="2026-11-13" data-level="3">
+      <header class="entry-head">
+        <div class="entry-meta">
+          <span class="chip">Counters &amp; limits</span>
+          <span class="level" title="Difficulty: level 3 of 3">Lv 3</span>
+          <time datetime="2026-11-13">13 Nov 2026</time>
+          <span class="read"><span class="read-time">4</span> min read</span>
+        </div>
+        <h2 class="entry-title">Design a ticket booking system (Ticketmaster-style)</h2>
+        <p class="lede">A band announces a show and a million fans want specific seats at once. The interview asks how to sell each seat exactly once.</p>
+        <nav class="steps" aria-label="Sections of this design">
+          <a href="#2026-11-13-ticket-booking-sec-functional">Features</a>
+          <a href="#2026-11-13-ticket-booking-sec-nonfunctional">Qualities</a>
+          <a href="#2026-11-13-ticket-booking-sec-entities">Entities</a>
+          <a href="#2026-11-13-ticket-booking-sec-api">API</a>
+          <a href="#2026-11-13-ticket-booking-sec-hld">Design</a>
+          <a href="#2026-11-13-ticket-booking-sec-deepdives">Deep dives</a>
+          <a href="#2026-11-13-ticket-booking-sec-tips">Tips</a>
+        </nav>
+      </header>
+
+      <div class="prose">
+        <details class="legend">
+          <summary>Legend <span class="hint">7 terms used below</span></summary>
+          <dl>
+            <div><dt>Hold</dt><dd>Seats reserved for one buyer for a few minutes. If they do not pay in time, the seats are free again.</dd></div>
+            <div><dt>Guarded update</dt><dd>One database command that changes a row only if a condition is true, so two buyers cannot both win.</dd></div>
+            <div><dt>Idempotency key</dt><dd>A unique label sent with a payment request. If the same request is sent twice, the provider charges once.</dd></div>
+            <div><dt>Queue</dt><dd>A waiting line of jobs. One part adds jobs, another takes them off one by one.</dd></div>
+            <div><dt>Cache</dt><dd>A small, fast store that keeps recent answers, so the database is not asked the same question again and again.</dd></div>
+            <div><dt>Waiting room</dt><dd>A virtual line. Buyers wait their turn and are let in a few at a time.</dd></div>
+            <div><dt>API gateway</dt><dd>The single front door that sends each request to the right service.</dd></div>
+          </dl>
+        </details>
+
+        <section class="sec reveal" id="2026-11-13-ticket-booking-sec-functional">
+          <h3>Functional requirements</h3>
+          <ul class="reqs">
+            <li>See an event's seat map and which seats are free.</li>
+            <li><dfn class="term" title="Seats reserved for one buyer for a few minutes. If they do not pay in time, the seats are free again.">Hold</dfn> chosen seats for a few minutes while paying.</li>
+            <li>Pay and get a confirmed booking.</li>
+          </ul>
+          <p class="out">Out of scope: refunds, resale, ticket prices, searching for events.</p>
+        </section>
+
+        <section class="sec reveal" id="2026-11-13-ticket-booking-sec-nonfunctional">
+          <h3>Non-functional requirements</h3>
+          <ul class="reqs nfr">
+            <li><strong>Never sell a seat twice.</strong> Two buyers on one seat is the worst bug.</li>
+            <li><strong>Fast seat map.</strong> Thousands keep refreshing it; a little staleness is fine.</li>
+            <li><strong>Survive the opening rush.</strong> Assume 500,000 fans chase 50,000 seats the moment sales open.</li>
+            <li><strong>Abandoned holds free up.</strong> Wandering buyers must not block seats.</li>
+          </ul>
+        </section>
+
+        <section class="sec reveal" id="2026-11-13-ticket-booking-sec-entities">
+          <h3>Core entities</h3>
+          <ul class="entities">
+            <li><strong>Seat:</strong> one per event and seat number, with a status: available, held or booked.</li>
+            <li><strong>Booking:</strong> the buyer, seats and payment result.</li>
+          </ul>
+        </section>
+
+        <section class="sec reveal" id="2026-11-13-ticket-booking-sec-api">
+          <h3>API design</h3>
+          <div class="api-list">
+            <div class="api">
+              <div class="api-sig"><span class="method get">GET</span><code>/events/{id}/seats?section=A&amp;cursor=...</code></div>
+              <p>One page of seats, plus a cursor for the next page.</p>
+              <div class="io">
+                <div><span class="io-l">Request body</span><pre>(none)</pre></div>
+                <div><span class="io-l">Response 200 OK</span><pre>{ "seats": [ { "seat_id": "A12",
+    "status": "available" } ],
+  "next_cursor": "c_91" }</pre></div>
+              </div>
+            </div>
+            <div class="api">
+              <div class="api-sig"><span class="method">POST</span><code>/events/{id}/holds</code></div>
+              <p>Holds all the seats or none. 409 if any seat is taken, 400 above 6 seats.</p>
+              <div class="io">
+                <div><span class="io-l">Request body</span><pre>{ "seat_ids": ["A12", "A13"] }</pre></div>
+                <div><span class="io-l">Response 201 Created</span><pre>{ "hold_id": "h_8f3",
+  "expires_at": "2026-11-14T10:05:00Z" }</pre></div>
+              </div>
+            </div>
+            <div class="api">
+              <div class="api-sig"><span class="method">POST</span><code>/bookings</code></div>
+              <p>Pays for a hold. 410 Gone if the hold expired, 402 if the card is declined.</p>
+              <div class="io">
+                <div><span class="io-l">Request body</span><pre>{ "hold_id": "h_8f3",
+  "payment_token": "tok_41" }</pre></div>
+                <div><span class="io-l">Response 201 Created</span><pre>{ "booking_id": "b_77c",
+  "status": "confirmed" }</pre></div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="sec" id="2026-11-13-ticket-booking-sec-hld">
+          <h3>High-level design</h3>
+          <div class="reveal">
+            <p>Even if 50,000 seats sold in 10 minutes, that is about 80 sales a second, which one database handles. Browsing is the heavy part. Servers are identical, keep no data, and sit behind a load balancer.</p>
+            <h4>1. Show the seats</h4>
+            <p>One row per seat, keyed by event and seat number.</p>
+            <h4>2. Hold seats</h4>
+            <p>A hold is just columns on the seat row: status <code>held</code>, a random <code>hold_id</code>, and a <code>hold_until</code> time 5 minutes ahead. One <dfn class="term" title="One database command that changes a row only if a condition is true, so two buyers cannot both win.">guarded update</dfn> changes a row only if the seat is available or its old hold has run out. If fewer rows change than seats asked for, we roll back and answer 409.</p>
+            <h4>3. Pay and confirm</h4>
+            <p>The Booking service checks the hold, then charges the card with the <code>hold_id</code> as an <dfn class="term" title="A unique label sent with a payment request. If the same request is sent twice, the provider charges once.">idempotency key</dfn>, so a retry cannot charge twice. In one transaction the seats become <code>booked</code> and a booking row is saved with a random UUID. The confirmation email goes on a <dfn class="term" title="A waiting line of jobs. One part adds jobs, another takes them off one by one.">queue</dfn> for a worker.</p>
+            <div class="table-scroll">
+              <table class="schema">
+                <caption>Table: seats</caption>
+                <thead><tr><th>Column</th><th>Type</th><th>Note</th></tr></thead>
+                <tbody>
+                  <tr><td>event_id, seat_id</td><td>text</td><td>primary key; one event's map is one range scan</td></tr>
+                  <tr><td>status</td><td>text</td><td>available, held, booked</td></tr>
+                  <tr><td>hold_id, hold_until</td><td>uuid, time</td><td>empty unless held</td></tr>
+                  <tr><td>booking_id</td><td>uuid</td><td>empty until booked</td></tr>
+                  <tr><td>hold_id</td><td>index</td><td>finds the seats of one hold</td></tr>
+                </tbody>
+              </table>
+            </div>
+            <div class="table-scroll">
+              <table class="schema">
+                <caption>Table: bookings</caption>
+                <thead><tr><th>Column</th><th>Type</th><th>Note</th></tr></thead>
+                <tbody>
+                  <tr><td>booking_id</td><td>uuid</td><td>primary key</td></tr>
+                  <tr><td>user_id, hold_id</td><td>bigint, uuid</td><td>user comes from the auth token</td></tr>
+                  <tr><td>status</td><td>text</td><td>confirmed, refunded</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <figure class="diagram-fig">
+            <div class="diagram-scroll" tabindex="0" role="group" aria-label="Diagram: simple ticket booking. Scrollable on small screens.">
+              <svg class="diagram" viewBox="0 0 760 380" role="img" aria-labelledby="2026-11-13-ticket-booking-d1-t 2026-11-13-ticket-booking-d1-d">
+                <title id="2026-11-13-ticket-booking-d1-t">Simple ticket booking</title>
+                <desc id="2026-11-13-ticket-booking-d1-d">The buyer sends requests to the app servers. The servers read the seat map from, and hold and sell seats in, a seats database, and send the card charge to an outside payment provider. A sign above the seats database lists its fields.</desc>
+<g class="d-node grass" style="--i:0"><rect x="8" y="150" width="82" height="60"/><text class="d-text" x="49" y="185" text-anchor="middle">Buyer</text></g>
+<path class="d-edge accent" style="--i:1" d="M90 180H190"/><path class="d-arrow accent" style="--i:1" d="M184 174L192 180L184 186Z"/><path class="d-arrow accent" style="--i:1" d="M96 174L88 180L96 186Z"/><text class="d-label" style="--i:1" x="140" y="170" text-anchor="middle">requests</text>
+<g class="d-node cmd" style="--i:2"><rect x="190" y="110" width="190" height="126"/><text class="d-text" x="285" y="136" text-anchor="middle">App servers</text><text class="d-item" x="202" y="162">- show the seat map</text><text class="d-item" x="202" y="182">- hold seats</text><text class="d-item" x="202" y="202">- confirm booking</text><text class="d-item" x="202" y="222">- charge the card</text></g>
+<path class="d-edge alt" style="--i:3" d="M380 142H560"/><path class="d-arrow alt" style="--i:3" d="M554 136L562 142L554 148Z"/><path class="d-arrow alt" style="--i:3" d="M386 136L378 142L386 148Z"/><text class="d-label" style="--i:3" x="470" y="132" text-anchor="middle">read, hold, sell</text>
+<g class="d-node chest" style="--i:3"><rect x="560" y="110" width="180" height="64"/><text class="d-text" x="650" y="138" text-anchor="middle">Seats DB</text><text class="d-sub" x="650" y="158" text-anchor="middle">seats + bookings</text></g>
+<path class="d-line" style="--i:3" d="M650 110V98"/>
+<g class="d-note" style="--i:3"><rect x="550" y="6" width="190" height="92"/><text class="d-note-t" x="562" y="26">seats table</text><text class="d-mono" x="562" y="48">event_id+seat_id  PK</text><text class="d-mono" x="562" y="66">status, hold_until</text><text class="d-mono" x="562" y="84">hold_id</text></g>
+<path class="d-edge accent" style="--i:4" d="M380 220H470V332H560"/><path class="d-arrow accent" style="--i:4" d="M554 326L562 332L554 338Z"/><path class="d-arrow accent" style="--i:4" d="M386 214L378 220L386 226Z"/><text class="d-label" style="--i:4" x="480" y="322">charge</text>
+<g class="d-node" style="--i:4"><rect x="560" y="300" width="180" height="64"/><text class="d-text" x="650" y="328" text-anchor="middle">Payment</text><text class="d-sub" x="650" y="348" text-anchor="middle">outside provider</text></g>
+<rect class="d-packet" x="-6" y="-6" width="12" height="12" opacity="0"><animateMotion dur="8s" begin="1.4s" repeatCount="indefinite" keyPoints="0;1;1" keyTimes="0;.4;1" calcMode="linear" path="M90 180H285V220H470V332H560"/><animate attributeName="opacity" dur="8s" begin="1.4s" repeatCount="indefinite" values="0;1;1;0;0" keyTimes="0;.02;.38;.4;1"/></rect>
+<rect class="d-packet alt" x="-6" y="-6" width="12" height="12" opacity="0"><animateMotion dur="8s" begin="1.4s" repeatCount="indefinite" keyPoints="0;0;1;1" keyTimes="0;.4;.65;1" calcMode="linear" path="M90 180H285V142H560"/><animate attributeName="opacity" dur="8s" begin="1.4s" repeatCount="indefinite" values="0;0;1;1;0;0" keyTimes="0;.4;.41;.64;.65;1"/></rect>
+              </svg>
+            </div>
+            <figcaption>The starting point: every seat is a database row. Gold = holding and paying, cyan = reading the seat map.</figcaption>
+            <button class="replay" type="button" aria-label="Replay diagram animation">Replay</button>
+          </figure>
+
+          <aside class="callout why reveal">
+            <span class="callout-label">Why</span>
+            <p><strong>Why hold seats instead of selling on click?</strong> Paying takes minutes, and without a hold buyers lose seats at the card step. The cost is seats sitting idle for up to 5 minutes.</p>
+          </aside>
+        </section>
+
+        <section class="sec" id="2026-11-13-ticket-booking-sec-deepdives">
+          <h3>Deep dives</h3>
+          <div class="dive reveal">
+            <h4>How do we stop two buyers getting one seat?</h4>
+            <p>Many fans click seat A12 at once.</p>
+            <ol class="options">
+              <li><strong>Read, then write.</strong> Both buyers read "available", so both write.</li>
+              <li><strong>Lock the row for the whole payment.</strong> Safe, but ties up a database connection for minutes.</li>
+              <li class="pick"><strong>Guarded update with an expiry.</strong><span class="pick-tag">Pick</span> One short command, and one buyer wins.</li>
+            </ol>
+            <p>The update sets <code>held</code> only where the seat is available or <code>hold_until</code> has passed, using the database's own clock. The loser sees zero rows changed and gets 409. Expired holds need no cleanup job, because the check treats them as free. Only the primary database decides.</p>
+          </div>
+
+          <div class="dive reveal">
+            <h4>How do we keep the seat map fast?</h4>
+            <p>Browsing far outnumbers holding.</p>
+            <ol class="options">
+              <li><strong>Query the database each time.</strong> Always right, but the database takes every refresh.</li>
+              <li><strong>Clear the cache on every change.</strong> Fresh, but a missed clear leaves a wrong map.</li>
+              <li class="pick"><strong>Short-lived cache.</strong><span class="pick-tag">Pick</span> Simple, and a little stale.</li>
+            </ol>
+            <p>The Seat service checks a <dfn class="term" title="A small, fast store that keeps recent answers, so the database is not asked the same question again and again.">cache</dfn> first: key <code>seats:{event}</code>, value the seat statuses, expiring after 3 seconds. On a miss it reads the replica and refills. A seat may look free when it is held, but the hold request decides.</p>
+          </div>
+
+          <div class="dive reveal">
+            <h4>How do we survive the opening rush?</h4>
+            <p>Letting 500,000 fans in at once would drown the services.</p>
+            <ol class="options">
+              <li><strong>Let everyone in.</strong> Servers fall over, and fast connections win.</li>
+              <li><strong>Reject extra traffic with 429.</strong> Entry becomes luck, and fans keep retrying.</li>
+              <li class="pick"><strong>A waiting room.</strong><span class="pick-tag">Pick</span> Fair, and the load is set by us.</li>
+            </ol>
+            <p>Fans join a <dfn class="term" title="A virtual line. Buyers wait their turn and are let in a few at a time.">waiting room</dfn> first. We admit 500 every 10 seconds, about 50 a second. Each admitted fan gets a signed pass valid for 10 minutes, and the gateway rejects holds and bookings without one.</p>
+          </div>
+
+          <div class="reveal">
+            <h4>Final design</h4>
+            <p>The dives added the guarded update, a short-lived seat cache and a waiting room. Browsing, holding and paying have different loads, so each is its own service, and only Hold and Booking change seats. An <dfn class="term" title="The single front door that sends each request to the right service.">API gateway</dfn> routes by path and checks the pass.</p>
+            <p>The seats database has a replica that takes over on failure. If the cache fails, the Seat service reads the replica. If the email queue is down, the booking stays saved and the email is retried later.</p>
+          </div>
+
+          <figure class="diagram-fig" id="2026-11-13-ticket-booking-final">
+            <div class="diagram-scroll" tabindex="0" role="group" aria-label="Diagram: the final ticket booking design. Scrollable on small screens.">
+              <svg class="diagram" viewBox="0 0 760 1140" role="img" aria-labelledby="2026-11-13-ticket-booking-d2-t 2026-11-13-ticket-booking-d2-d">
+                <title id="2026-11-13-ticket-booking-d2-t">Final ticket booking design</title>
+                <desc id="2026-11-13-ticket-booking-d2-d">The buyer talks to an API gateway. The gateway sends GET queue to the Waiting room service, GET seats to the Seat service, POST holds to the Hold service and POST bookings to the Booking service. The Waiting room keeps the line in a line store. The Seat service checks the seat cache first and reads the seats database on a miss. The Hold service does a guarded update in the seats database. The Booking service marks seats sold in the seats database, charges the card through a payment provider, and puts a confirmation on the email queue, which the email worker sends. Signs show the line store, seat cache, seats table and queue message.</desc>
+<g class="d-node grass" style="--i:0"><rect x="4" y="486" width="66" height="60"/><text class="d-text" x="37" y="521" text-anchor="middle">Buyer</text></g>
+<path class="d-edge accent" style="--i:1" d="M70 516H88"/><path class="d-arrow accent" style="--i:1" d="M82 510L90 516L82 522Z"/><path class="d-arrow accent" style="--i:1" d="M76 510L68 516L76 522Z"/>
+<g class="d-node" style="--i:1"><rect x="88" y="118" width="72" height="796"/><text class="d-text" x="124" y="500" text-anchor="middle">API</text><text class="d-text" x="124" y="518" text-anchor="middle">gateway</text><text class="d-item" x="94" y="544">- one door</text><text class="d-item" x="94" y="564">- by path</text></g>
+<path class="d-edge" style="--i:2" d="M160 170H288"/><path class="d-arrow" style="--i:2" d="M282 164L290 170L282 176Z"/><path class="d-arrow" style="--i:2" d="M166 164L158 170L166 176Z"/><text class="d-label" style="--i:2" x="224" y="160" text-anchor="middle">GET .../queue</text>
+<g class="d-node cmd" style="--i:2"><rect x="288" y="118" width="170" height="104"/><text class="d-text" x="373" y="144" text-anchor="middle">Waiting room</text><text class="d-item" x="300" y="170">- line up buyers</text><text class="d-item" x="300" y="190">- admit 500 per 10 s</text><text class="d-item" x="300" y="210">- hand out a pass</text></g>
+<path class="d-edge" style="--i:3" d="M458 170H610"/><path class="d-arrow" style="--i:3" d="M604 164L612 170L604 176Z"/><path class="d-arrow" style="--i:3" d="M464 164L456 170L464 176Z"/><text class="d-label" style="--i:3" x="534" y="160" text-anchor="middle">join, admit</text>
+<path class="d-line" style="--i:3" d="M680 100V120"/>
+<g class="d-note" style="--i:3"><rect x="560" y="8" width="190" height="92"/><text class="d-note-t" x="572" y="28">line store</text><text class="d-mono" x="572" y="50">line:{event}</text><text class="d-mono" x="572" y="68">user_id -> join time</text><text class="d-mono" x="572" y="86">pass TTL 10 min</text></g>
+<g class="d-node furnace" style="--i:3"><rect x="610" y="120" width="140" height="82"/><text class="d-text" x="680" y="148" text-anchor="middle">Line store</text><text class="d-item" x="622" y="174">- who waits</text><text class="d-item" x="622" y="194">- by join time</text></g>
+<path class="d-edge alt" style="--i:4" d="M160 362H288"/><path class="d-arrow alt" style="--i:4" d="M282 356L290 362L282 368Z"/><path class="d-arrow alt" style="--i:4" d="M166 356L158 362L166 368Z"/><text class="d-label" style="--i:4" x="224" y="352" text-anchor="middle">GET .../seats</text>
+<g class="d-node cmd" style="--i:4"><rect x="288" y="322" width="170" height="104"/><text class="d-text" x="373" y="348" text-anchor="middle">Seat service</text><text class="d-item" x="300" y="374">- show the seat map</text><text class="d-item" x="300" y="394">- cache first</text><text class="d-item" x="300" y="414">- else read replica</text></g>
+<path class="d-edge alt" style="--i:5" d="M458 362H610"/><path class="d-arrow alt" style="--i:5" d="M604 356L612 362L604 368Z"/><path class="d-arrow alt" style="--i:5" d="M464 356L456 362L464 368Z"/><text class="d-label" style="--i:5" x="534" y="352" text-anchor="middle">check first, refill</text>
+<path class="d-line" style="--i:5" d="M680 306V322"/>
+<g class="d-note" style="--i:5"><rect x="560" y="214" width="190" height="92"/><text class="d-note-t" x="572" y="234">seat cache</text><text class="d-mono" x="572" y="256">seats:{event}</text><text class="d-mono" x="572" y="274">-> seat statuses</text><text class="d-mono" x="572" y="292">TTL 3 s</text></g>
+<g class="d-node gem" style="--i:5"><rect x="610" y="322" width="140" height="82"/><text class="d-text" x="680" y="350" text-anchor="middle">Seat cache</text><text class="d-item" x="622" y="376">- seat map</text><text class="d-item" x="622" y="396">- TTL 3 seconds</text></g>
+<path class="d-edge alt" style="--i:6" d="M458 400H534V600H610"/><path class="d-arrow alt" style="--i:6" d="M604 594L612 600L604 606Z"/><path class="d-arrow alt" style="--i:6" d="M464 394L456 400L464 406Z"/><text class="d-label" style="--i:6" x="542" y="590">on miss</text>
+<path class="d-line" style="--i:6" d="M680 532V548"/>
+<g class="d-note" style="--i:6"><rect x="560" y="420" width="190" height="112"/><text class="d-note-t" x="572" y="440">seats table</text><text class="d-mono" x="572" y="462">event_id+seat_id  PK</text><text class="d-mono" x="572" y="480">status</text><text class="d-mono" x="572" y="498">hold_id, hold_until</text><text class="d-mono" x="572" y="516">booking_id</text></g>
+<g class="d-node chest" style="--i:6"><rect x="610" y="548" width="140" height="304"/><text class="d-text" x="680" y="578" text-anchor="middle">Seats DB</text><text class="d-item" x="622" y="608">- seat rows</text><text class="d-item" x="622" y="628">- booking rows</text><text class="d-item" x="622" y="648">- has a replica</text><text class="d-item" x="622" y="668">- fails over</text></g>
+<path class="d-edge accent" style="--i:7" d="M160 692H288"/><path class="d-arrow accent" style="--i:7" d="M282 686L290 692L282 698Z"/><path class="d-arrow accent" style="--i:7" d="M166 686L158 692L166 698Z"/><text class="d-label" style="--i:7" x="224" y="682" text-anchor="middle">POST .../holds</text>
+<g class="d-node cmd" style="--i:7"><rect x="288" y="640" width="170" height="104"/><text class="d-text" x="373" y="666" text-anchor="middle">Hold service</text><text class="d-item" x="300" y="692">- all-or-none update</text><text class="d-item" x="300" y="712">- hold for 5 min</text><text class="d-item" x="300" y="732">- 409 if taken</text></g>
+<path class="d-edge accent" style="--i:8" d="M458 692H610"/><path class="d-arrow accent" style="--i:8" d="M604 686L612 692L604 698Z"/><path class="d-arrow accent" style="--i:8" d="M464 686L456 692L464 698Z"/><text class="d-label" style="--i:8" x="534" y="682" text-anchor="middle">guarded update</text>
+<path class="d-edge accent" style="--i:9" d="M160 840H288"/><path class="d-arrow accent" style="--i:9" d="M282 834L290 840L282 846Z"/><path class="d-arrow accent" style="--i:9" d="M166 834L158 840L166 846Z"/><text class="d-label" style="--i:9" x="224" y="830" text-anchor="middle">POST /bookings</text>
+<g class="d-node cmd" style="--i:9"><rect x="288" y="790" width="170" height="124"/><text class="d-text" x="373" y="816" text-anchor="middle">Booking svc</text><text class="d-item" x="300" y="842">- check hold is live</text><text class="d-item" x="300" y="862">- charge card once</text><text class="d-item" x="300" y="882">- mark seats sold</text><text class="d-item" x="300" y="902">- queue the email</text></g>
+<path class="d-edge accent" style="--i:10" d="M458 830H610"/><path class="d-arrow accent" style="--i:10" d="M604 824L612 830L604 836Z"/><path class="d-arrow accent" style="--i:10" d="M464 824L456 830L464 836Z"/><text class="d-label" style="--i:10" x="534" y="820" text-anchor="middle">mark sold</text>
+<path class="d-edge accent" style="--i:11" d="M458 888H610"/><path class="d-arrow accent" style="--i:11" d="M604 882L612 888L604 894Z"/><path class="d-arrow accent" style="--i:11" d="M464 882L456 888L464 894Z"/><text class="d-label" style="--i:11" x="534" y="878" text-anchor="middle">charge</text>
+<g class="d-node" style="--i:11"><rect x="610" y="868" width="140" height="90"/><text class="d-text" x="680" y="896" text-anchor="middle">Payment</text><text class="d-item" x="622" y="922">- card provider</text><text class="d-item" x="622" y="942">- charge once</text></g>
+<path class="d-edge accent" style="--i:12" d="M373 914V950"/><path class="d-arrow accent" style="--i:12" d="M367 944L373 952L379 944Z"/><text class="d-label" style="--i:12" x="381" y="938">email</text>
+<g class="d-node furnace" style="--i:12"><rect x="288" y="950" width="170" height="56"/><text class="d-text" x="373" y="976" text-anchor="middle">Email queue</text><text class="d-sub" x="373" y="996" text-anchor="middle">confirmations</text></g>
+<path class="d-line" style="--i:12" d="M458 978H468"/>
+<g class="d-note" style="--i:12"><rect x="468" y="938" width="130" height="82"/><text class="d-note-t" x="480" y="958">email queue</text><text class="d-mono" x="480" y="980">booking_id</text><text class="d-mono" x="480" y="998">email, seats</text></g>
+<path class="d-edge" style="--i:13" d="M373 1006V1042"/><path class="d-arrow" style="--i:13" d="M367 1036L373 1044L379 1036Z"/><text class="d-label" style="--i:13" x="381" y="1030">next</text>
+<g class="d-node furnace" style="--i:13"><rect x="288" y="1042" width="170" height="82"/><text class="d-text" x="373" y="1068" text-anchor="middle">Email worker</text><text class="d-item" x="300" y="1094">- send the email</text><text class="d-item" x="300" y="1114">- retry on failure</text></g>
+<rect class="d-packet" x="-6" y="-6" width="12" height="12" opacity="0"><animateMotion dur="8s" begin="1.6s" repeatCount="indefinite" keyPoints="0;1;1" keyTimes="0;.3;1" calcMode="linear" path="M70 516H124V692H610"/><animate attributeName="opacity" dur="8s" begin="1.6s" repeatCount="indefinite" values="0;1;1;0;0" keyTimes="0;.02;.28;.3;1"/></rect>
+<rect class="d-packet alt" x="-6" y="-6" width="12" height="12" opacity="0"><animateMotion dur="8s" begin="1.6s" repeatCount="indefinite" keyPoints="0;0;1;1" keyTimes="0;.4;.7;1" calcMode="linear" path="M70 516H124V362H610"/><animate attributeName="opacity" dur="8s" begin="1.6s" repeatCount="indefinite" values="0;0;1;1;0;0" keyTimes="0;.4;.41;.69;.7;1"/></rect>
+              </svg>
+            </div>
+            <figcaption>The complete system. Gold = holding seats and paying, cyan = reading the seat map. Fans enter through the waiting room first; the gateway checks their pass.</figcaption>
+            <button class="replay" type="button" aria-label="Replay diagram animation">Replay</button>
+          </figure>
+
+          <div class="next reveal">
+            <h4>What you could add next</h4>
+            <ul class="next-list">
+              <li>Live seat updates pushed over WebSockets.</li>
+              <li>Bot checks in the waiting room.</li>
+              <li>Splitting the seats database by event.</li>
+            </ul>
+          </div>
+        </section>
+
+        <section class="sec reveal" id="2026-11-13-ticket-booking-sec-tips">
+          <h3>Interview tips</h3>
+          <dl class="qa">
+            <div><dt>The hold runs out while the buyer pays?</dt><dd>The final update only works if the hold is still theirs; otherwise the charge is refunded.</dd></div>
+            <div><dt>Why not a Redis lock for holds?</dt><dd>It works, but then two stores know the truth.</dd></div>
+            <div><dt>Two buyers pick one seat at the same millisecond?</dt><dd>The guarded update lets one win; the other gets 409.</dd></div>
+          </dl>
+          <h4>Common mistakes</h4>
+          <ul class="mistakes">
+            <li>Selling only at payment time, with no hold.</li>
+            <li>Deciding seat status from a replica or the cache.</li>
+          </ul>
+          <aside class="callout tip">
+            <span class="callout-label">Interview tip</span>
+            <p>Name the double-selling race first, then show the guarded update.</p>
+          </aside>
+          <aside class="callout confidence">
+            <span class="callout-label">Confidence note</span>
+            <p>The fan counts, 5-minute holds and 500-per-10-seconds admission are assumptions. A Redis lock with a TTL for holds is also a valid answer.</p>
+          </aside>
+        </section>
+
+        <p class="sources">Sources: Hello Interview's <a href="https://www.hellointerview.com/learn/system-design/problem-breakdowns/ticketmaster">Ticketmaster breakdown</a> and delivery framework; Alex Xu, <em>System Design Interview Vol. 2</em>, chapter "Hotel Reservation System"; PostgreSQL docs, <a href="https://www.postgresql.org/docs/current/sql-update.html">UPDATE</a>. This is a common approach, not a claim about any company's internals.</p>
+      </div>
+    </article>
     <article class="entry" id="2026-11-12-ride-hailing" data-topic="Ride hailing" data-domain="Geo &amp; location" data-date="2026-11-12" data-level="3">
       <header class="entry-head">
         <div class="entry-meta">
