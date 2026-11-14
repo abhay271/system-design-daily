@@ -420,6 +420,7 @@ dfn.term{font-style:normal;border-bottom:2px dotted var(--accent);cursor:help}
       <h2><svg viewBox="0 0 12 12" aria-hidden="true"><path fill="#7A4A2A" d="M0 2h12v9H0z"/><path fill="#A86A3C" d="M1 3h10v3H1zM1 7h10v3H1z"/><path fill="#E9B526" d="M5 5h2v3H5z"/><path fill="#4A2C18" d="M0 6h5v1H0zM7 6h5v1H7z"/></svg>Archive</h2>
       <ol class="toc">
         <!-- TOC -->
+        <li><a href="#2026-11-14-video-streaming"><time datetime="2026-11-14">2026-11-14</time><span>Video streaming: convert once, play in pieces from a nearby CDN</span></a></li>
         <li><a href="#2026-11-13-ticket-booking"><time datetime="2026-11-13">2026-11-13</time><span>Ticket booking: hold the seat first, sell it once</span></a></li>
         <li><a href="#2026-11-12-ride-hailing"><time datetime="2026-11-12">2026-11-12</time><span>Ride hailing: a live driver map, and one ride per driver</span></a></li>
         <li><a href="#2026-11-11-file-sync"><time datetime="2026-11-11">2026-11-11</time><span>File sync: send only the changed pieces, straight to storage</span></a></li>
@@ -445,6 +446,276 @@ dfn.term{font-style:normal;border-bottom:2px dotted var(--accent);cursor:help}
 
   <main id="entries" tabindex="-1">
     <!-- ENTRIES -->
+    <article class="entry" id="2026-11-14-video-streaming" data-topic="Video streaming" data-domain="Media &amp; files" data-date="2026-11-14" data-level="3">
+      <header class="entry-head">
+        <div class="entry-meta">
+          <span class="chip">Media &amp; files</span>
+          <span class="level" title="Difficulty: level 3 of 3">Lv 3</span>
+          <time datetime="2026-11-14">14 Nov 2026</time>
+          <span class="read"><span class="read-time">4</span> min read</span>
+        </div>
+        <h2 class="entry-title">Design a video streaming service (YouTube-style)</h2>
+        <p class="lede">You upload a video, and a friend watches it on slow hotel Wi-Fi without freezing. How do we store, convert and deliver it?</p>
+        <nav class="steps" aria-label="Sections of this design">
+          <a href="#2026-11-14-video-streaming-sec-functional">Features</a>
+          <a href="#2026-11-14-video-streaming-sec-nonfunctional">Qualities</a>
+          <a href="#2026-11-14-video-streaming-sec-entities">Entities</a>
+          <a href="#2026-11-14-video-streaming-sec-api">API</a>
+          <a href="#2026-11-14-video-streaming-sec-hld">Design</a>
+          <a href="#2026-11-14-video-streaming-sec-deepdives">Deep dives</a>
+          <a href="#2026-11-14-video-streaming-sec-tips">Tips</a>
+        </nav>
+      </header>
+
+      <div class="prose">
+        <details class="legend">
+          <summary>Legend <span class="hint">8 terms used below</span></summary>
+          <dl>
+            <div><dt>Blob storage</dt><dd>A service that stores big files cheaply and keeps copies on several machines, so they are not lost. Amazon S3 is an example.</dd></div>
+            <div><dt>Pre-signed URL</dt><dd>A temporary link that lets one client write or read one file in storage, without logging in. It stops working after a set time.</dd></div>
+            <div><dt>Queue</dt><dd>A waiting line of jobs. One part adds jobs, another takes them off one by one.</dd></div>
+            <div><dt>Transcoding</dt><dd>Converting a video into other sizes and qualities, such as 360p, 720p and 1080p.</dd></div>
+            <div><dt>Segment</dt><dd>A short piece of a video, here about 4 seconds long. A player downloads a video one segment at a time.</dd></div>
+            <div><dt>Playlist</dt><dd>A small text file that lists every quality and its segments, so the player knows what to fetch. Also called a manifest.</dd></div>
+            <div><dt>CDN</dt><dd>A network of cache servers around the world. A viewer gets files from a nearby one instead of from our storage far away.</dd></div>
+            <div><dt>API gateway</dt><dd>The single front door that sends each request to the right service.</dd></div>
+          </dl>
+        </details>
+
+        <section class="sec reveal" id="2026-11-14-video-streaming-sec-functional">
+          <h3>Functional requirements</h3>
+          <ul class="reqs">
+            <li>Upload a video.</li>
+                        <li>Watch a video, starting fast and without freezing.</li>
+          </ul>
+          <p class="out">Out of scope: search, recommendations, comments, live streaming.</p>
+        </section>
+
+        <section class="sec reveal" id="2026-11-14-video-streaming-sec-nonfunctional">
+          <h3>Non-functional requirements</h3>
+          <ul class="reqs nfr">
+            <li><strong>Smooth, quick playback.</strong> Viewers range from fibre to weak mobile data.</li>
+            <li><strong>Reliable big uploads.</strong> Assume files up to 10 GB; a drop must not restart them.</li>
+            <li><strong>Never lose a video.</strong> Uploaded means safe.</li>
+            <li><strong>Uploaders never wait on conversion.</strong> Converting takes minutes.</li>
+          </ul>
+        </section>
+
+        <section class="sec reveal" id="2026-11-14-video-streaming-sec-entities">
+          <h3>Core entities</h3>
+          <ul class="entities">
+            <li><strong>Video:</strong> id, uploader, title, status and playlist location.</li>
+            <li><strong>Video files:</strong> the raw upload and converted segments, kept in storage, not the database.</li>
+          </ul>
+        </section>
+
+        <section class="sec reveal" id="2026-11-14-video-streaming-sec-api">
+          <h3>API design</h3>
+          <div class="api-list">
+            <div class="api">
+              <div class="api-sig"><span class="method">POST</span><code>/videos</code></div>
+              <p>Returns one upload link per 10 MB part. 413 if over 10 GB.</p>
+              <div class="io">
+                <div><span class="io-l">Request body</span><pre>{ "title": "My trip",
+  "size_bytes": 734003200 }</pre></div>
+                <div><span class="io-l">Response 201 Created</span><pre>{ "video_id": "v_91c",
+  "part_urls": ["https://storage/...?sig=a",
+                "https://storage/...?sig=b"] }</pre></div>
+              </div>
+            </div>
+            <div class="api">
+              <div class="api-sig"><span class="method">POST</span><code>/videos/{id}/complete</code></div>
+              <p>Says every part is uploaded. 202 Accepted, as conversion comes later. 400 if parts are missing.</p>
+              <div class="io">
+                <div><span class="io-l">Request body</span><pre>{ "parts": [ { "n": 1, "etag": "e1" } ] }</pre></div>
+                <div><span class="io-l">Response 202 Accepted</span><pre>{ "status": "processing" }</pre></div>
+              </div>
+            </div>
+            <div class="api">
+              <div class="api-sig"><span class="method get">GET</span><code>/videos/{id}</code></div>
+              <p>Returns the status, and the playlist link once ready. 404 if unknown.</p>
+              <div class="io">
+                <div><span class="io-l">Request body</span><pre>(none)</pre></div>
+                <div><span class="io-l">Response 200 OK</span><pre>{ "title": "My trip", "status": "ready",
+  "playlist_url": "https://cdn/v_91c/master.m3u8" }</pre></div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="sec" id="2026-11-14-video-streaming-sec-hld">
+          <h3>High-level design</h3>
+          <div class="reveal">
+            <p>Assume 100,000 uploads a day: about 1 a second, easy for one database. The bytes are the hard part. A 5-minute 720p video is about 100 MB (at 2.5 Mbps), so 10 million views a day could mean up to 1 PB out of storage. Video bytes therefore skip our servers. Servers are identical, keep no data, and sit behind a load balancer.</p>
+            <h4>1. Upload a video</h4>
+            <p>The Upload service makes a UUID as the video id, saves a row with status <code>uploading</code> and returns <dfn class="term" title="A temporary link that lets one client write or read one file in storage, without logging in. It stops working after a set time.">pre-signed URLs</dfn>, and the client sends the file straight to <dfn class="term" title="A service that stores big files cheaply and keeps copies on several machines, so they are not lost. Amazon S3 is an example.">blob storage</dfn>.</p>
+            <h4>2. Convert it</h4>
+            <p>On complete, the row becomes <code>processing</code> and a job goes on a <dfn class="term" title="A waiting line of jobs. One part adds jobs, another takes them off one by one.">queue</dfn>. A worker does <dfn class="term" title="Converting a video into other sizes and qualities, such as 360p, 720p and 1080p.">transcoding</dfn>: it makes three qualities, cuts each into <dfn class="term" title="A short piece of a video, here about 4 seconds long. A player downloads a video one segment at a time.">segments</dfn>, and writes a <dfn class="term" title="A small text file that lists every quality and its segments, so the player knows what to fetch. Also called a manifest.">playlist</dfn>. Then it sets the row to <code>ready</code>.</p>
+            <h4>3. Watch it</h4>
+            <p>The Watch service returns the playlist link once the row says <code>ready</code>. The player then fetches the segments itself.</p>
+            <div class="table-scroll">
+              <table class="schema">
+                <caption>Table: videos</caption>
+                <thead><tr><th>Column</th><th>Type</th><th>Note</th></tr></thead>
+                <tbody>
+                  <tr><td>video_id</td><td>uuid</td><td>primary key; every lookup is by id</td></tr>
+                  <tr><td>uploader_id</td><td>bigint</td><td>comes from the auth token</td></tr>
+                  <tr><td>title</td><td>text</td><td>set at upload</td></tr>
+                  <tr><td>status</td><td>text</td><td>uploading, processing, ready, failed</td></tr>
+                  <tr><td>playlist_key</td><td>text</td><td>path of the playlist; empty until ready</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <figure class="diagram-fig">
+            <div class="diagram-scroll" tabindex="0" role="group" aria-label="Diagram: simple video streaming. Scrollable on small screens.">
+              <svg class="diagram" viewBox="0 0 760 400" role="img" aria-labelledby="2026-11-14-video-streaming-d1-t 2026-11-14-video-streaming-d1-d">
+                <title id="2026-11-14-video-streaming-d1-t">Simple video streaming</title>
+                <desc id="2026-11-14-video-streaming-d1-d">The client sends requests to the app servers, which read and write video rows in a metadata database. The client sends and receives video files directly with blob storage. Signs show the videos table and the storage layout.</desc>
+<g class="d-node grass" style="--i:0"><rect x="8" y="150" width="82" height="60"/><text class="d-text" x="49" y="185" text-anchor="middle">Client</text></g>
+<path class="d-edge alt" style="--i:1" d="M90 180H190"/><path class="d-arrow alt" style="--i:1" d="M184 174L192 180L184 186Z"/><path class="d-arrow alt" style="--i:1" d="M96 174L88 180L96 186Z"/><text class="d-label" style="--i:1" x="140" y="170" text-anchor="middle">requests</text>
+<g class="d-node cmd" style="--i:2"><rect x="190" y="110" width="190" height="104"/><text class="d-text" x="285" y="136" text-anchor="middle">App servers</text><text class="d-item" x="202" y="162">- save the video row</text><text class="d-item" x="202" y="182">- give upload links</text><text class="d-item" x="202" y="202">- return the playlist</text></g>
+<path class="d-edge alt" style="--i:3" d="M380 142H560"/><path class="d-arrow alt" style="--i:3" d="M554 136L562 142L554 148Z"/><path class="d-arrow alt" style="--i:3" d="M386 136L378 142L386 148Z"/><text class="d-label" style="--i:3" x="470" y="132" text-anchor="middle">read, write rows</text>
+<g class="d-node chest" style="--i:3"><rect x="560" y="110" width="180" height="64"/><text class="d-text" x="650" y="138" text-anchor="middle">Metadata DB</text><text class="d-sub" x="650" y="158" text-anchor="middle">one row per video</text></g>
+<path class="d-line" style="--i:3" d="M650 110V98"/>
+<g class="d-note" style="--i:3"><rect x="550" y="6" width="190" height="92"/><text class="d-note-t" x="562" y="26">videos table</text><text class="d-mono" x="562" y="48">video_id  PK</text><text class="d-mono" x="562" y="66">title, uploader_id</text><text class="d-mono" x="562" y="84">status, playlist_key</text></g>
+<path class="d-edge accent" style="--i:4" d="M49 210V350H560"/><path class="d-arrow accent" style="--i:4" d="M554 344L562 350L554 356Z"/><path class="d-arrow accent" style="--i:4" d="M43 216L49 208L55 216Z"/><text class="d-label" style="--i:4" x="300" y="340" text-anchor="middle">upload parts, download segments</text>
+<path class="d-line" style="--i:5" d="M650 306V318"/>
+<g class="d-note" style="--i:5"><rect x="550" y="214" width="190" height="92"/><text class="d-note-t" x="562" y="234">storage layout</text><text class="d-mono" x="562" y="256">raw/{id}/part-N</text><text class="d-mono" x="562" y="274">video/{id}/seg-N</text><text class="d-mono" x="562" y="292">video/{id}/master</text></g>
+<g class="d-node chest" style="--i:5"><rect x="560" y="318" width="180" height="64"/><text class="d-text" x="650" y="346" text-anchor="middle">Blob storage</text><text class="d-sub" x="650" y="366" text-anchor="middle">raw and converted</text></g>
+<rect class="d-packet alt" x="-6" y="-6" width="12" height="12" opacity="0"><animateMotion dur="8s" begin="1.4s" repeatCount="indefinite" keyPoints="0;1;1" keyTimes="0;.4;1" calcMode="linear" path="M90 180H285V142H560"/><animate attributeName="opacity" dur="8s" begin="1.4s" repeatCount="indefinite" values="0;1;1;0;0" keyTimes="0;.02;.38;.4;1"/></rect>
+<rect class="d-packet" x="-6" y="-6" width="12" height="12" opacity="0"><animateMotion dur="8s" begin="1.4s" repeatCount="indefinite" keyPoints="0;0;1;1" keyTimes="0;.4;.8;1" calcMode="linear" path="M49 210V350H560"/><animate attributeName="opacity" dur="8s" begin="1.4s" repeatCount="indefinite" values="0;0;1;1;0;0" keyTimes="0;.4;.41;.79;.8;1"/></rect>
+              </svg>
+            </div>
+            <figcaption>The starting point: video files go straight to storage, and only small rows go through our servers. Gold = uploading a video, cyan = asking for a video's details. Conversion is added in the deep dives.</figcaption>
+            <button class="replay" type="button" aria-label="Replay diagram animation">Replay</button>
+          </figure>
+
+          <aside class="callout why reveal">
+            <span class="callout-label">Why</span>
+            <p><strong>Why convert a video instead of serving the uploaded file?</strong> A weak connection cannot play a phone's 4K file. Converting once gives every viewer a quality that fits, at the cost of about three times the storage.</p>
+          </aside>
+        </section>
+
+        <section class="sec" id="2026-11-14-video-streaming-sec-deepdives">
+          <h3>Deep dives</h3>
+          <div class="dive reveal">
+            <h4>How do we upload a 10 GB file reliably?</h4>
+            <p>Mobile uploads often drop.</p>
+            <ol class="options">
+              <li><strong>Send it through our servers.</strong> Servers hold connections for hours; one drop restarts.</li>
+              <li><strong>One pre-signed URL for the whole file.</strong> One drop still restarts from zero.</li>
+              <li class="pick"><strong>Multipart upload with a URL per part.</strong><span class="pick-tag">Pick</span> Only failed parts are retried.</li>
+            </ol>
+            <p>The file is cut into 10 MB parts, each with its own URL valid for 1 hour. After a drop, the client asks storage which parts it has and sends the rest. We hand out only as many URLs as the stated size needs, which enforces the 10 GB limit.</p>
+          </div>
+
+          <div class="dive reveal">
+            <h4>How do we convert videos without making the uploader wait?</h4>
+            <p>Transcoding takes minutes of heavy computing.</p>
+            <ol class="options">
+              <li><strong>Convert inside the complete request.</strong> The request times out and the uploader waits.</li>
+              <li><strong>Convert on the app server.</strong> If that server restarts, the job is lost.</li>
+              <li class="pick"><strong>A queue and a pool of workers.</strong><span class="pick-tag">Pick</span> Jobs survive crashes.</li>
+            </ol>
+            <p>A worker removes a job only when it finishes. If it crashes, the job reappears for another worker, and after 3 failed tries the row becomes <code>failed</code>. Files are written first and <code>ready</code> last, so no viewer sees half a video. If the queue is down, complete answers 503 and the client retries.</p>
+          </div>
+
+          <div class="dive reveal">
+            <h4>How do we play smoothly on any connection, anywhere?</h4>
+            <p>Viewers' speeds vary, even mid-video.</p>
+            <ol class="options">
+              <li><strong>Serve one file.</strong> One quality, and the viewer waits on a big download.</li>
+              <li><strong>Stream from our storage.</strong> Far viewers are slow; storage takes every request.</li>
+              <li class="pick"><strong>Segments in three qualities, through a CDN.</strong><span class="pick-tag">Pick</span> Adapts, and is served nearby.</li>
+            </ol>
+            <p>This is adaptive streaming (HLS or MPEG-DASH). The player starts low, then picks each next segment's quality from its download speed. The <dfn class="term" title="A network of cache servers around the world. A viewer gets files from a nearby one instead of from our storage far away.">CDN</dfn> caches each segment by path. A segment never changes, so it stays a year with no clearing. On a miss, the CDN fetches it from storage.</p>
+          </div>
+
+          <div class="reveal">
+            <h4>Final design</h4>
+            <p>The dives added multipart uploads, a queue with transcode workers, and CDN delivery. Uploading, converting and watching have different loads, so each scales alone. An <dfn class="term" title="The single front door that sends each request to the right service.">API gateway</dfn> routes by path.</p>
+            <p>The metadata database has a replica that takes over on failure, and the Watch service reads it, so a video may look "processing" a moment too long. That is fine. Storage keeps several copies of each file.</p>
+          </div>
+
+          <figure class="diagram-fig" id="2026-11-14-video-streaming-final">
+            <div class="diagram-scroll" tabindex="0" role="group" aria-label="Diagram: the final video streaming design. Scrollable on small screens.">
+              <svg class="diagram" viewBox="0 0 760 1000" role="img" aria-labelledby="2026-11-14-video-streaming-d2-t 2026-11-14-video-streaming-d2-d">
+                <title id="2026-11-14-video-streaming-d2-t">Final video streaming design</title>
+                <desc id="2026-11-14-video-streaming-d2-d">The client talks to an API gateway. The gateway sends GET videos to the Watch service and POST videos to the Upload service, and both use the metadata database. The Upload service puts a job on the queue; the transcoder takes jobs, reads the raw file from blob storage, writes segments and the playlist back, and sets the video row to ready. The client uploads parts straight to blob storage with pre-signed URLs, and plays video from the CDN, which fetches from storage on a miss. Signs show the videos table, the job message, the storage layout and the CDN cache.</desc>
+<g class="d-node grass" style="--i:0"><rect x="4" y="100" width="72" height="770"/><text class="d-text" x="40" y="232" text-anchor="middle">Client</text></g>
+<path class="d-edge accent" style="--i:1" d="M76 227H88"/><path class="d-arrow accent" style="--i:1" d="M82 221L90 227L82 233Z"/><path class="d-arrow accent" style="--i:1" d="M82 221L74 227L82 233Z"/>
+<g class="d-node" style="--i:1"><rect x="88" y="100" width="72" height="254"/><text class="d-text" x="124" y="248" text-anchor="middle">API</text><text class="d-text" x="124" y="266" text-anchor="middle">gateway</text><text class="d-item" x="94" y="292">- one door</text><text class="d-item" x="94" y="312">- by path</text></g>
+<path class="d-edge alt" style="--i:2" d="M160 150H288"/><path class="d-arrow alt" style="--i:2" d="M282 144L290 150L282 156Z"/><path class="d-arrow alt" style="--i:2" d="M166 144L158 150L166 156Z"/><text class="d-label" style="--i:2" x="224" y="140" text-anchor="middle">GET /videos/{id}</text>
+<g class="d-node cmd" style="--i:2"><rect x="288" y="100" width="180" height="104"/><text class="d-text" x="378" y="126" text-anchor="middle">Watch svc</text><text class="d-item" x="300" y="152">- read the video row</text><text class="d-item" x="300" y="172">- send playlist link</text><text class="d-item" x="300" y="192">- only when ready</text></g>
+<path class="d-edge alt" style="--i:3" d="M468 150H610"/><path class="d-arrow alt" style="--i:3" d="M604 144L612 150L604 156Z"/><path class="d-arrow alt" style="--i:3" d="M474 144L466 150L474 156Z"/><text class="d-label" style="--i:3" x="539" y="140" text-anchor="middle">read replica</text>
+<path class="d-line" style="--i:3" d="M680 100V120"/>
+<g class="d-note" style="--i:3"><rect x="560" y="8" width="190" height="92"/><text class="d-note-t" x="572" y="28">videos table</text><text class="d-mono" x="572" y="50">video_id  PK</text><text class="d-mono" x="572" y="68">title, uploader_id</text><text class="d-mono" x="572" y="86">status, playlist_key</text></g>
+<g class="d-node chest" style="--i:3"><rect x="610" y="120" width="140" height="410"/><text class="d-text" x="680" y="150" text-anchor="middle">Metadata DB</text><text class="d-item" x="622" y="180">- one row per video</text><text class="d-item" x="622" y="200">- status of each</text><text class="d-item" x="622" y="220">- has a replica</text><text class="d-item" x="622" y="240">- fails over</text></g>
+<path class="d-edge accent" style="--i:4" d="M160 300H288"/><path class="d-arrow accent" style="--i:4" d="M282 294L290 300L282 306Z"/><path class="d-arrow accent" style="--i:4" d="M166 294L158 300L166 306Z"/><text class="d-label" style="--i:4" x="224" y="290" text-anchor="middle">POST /videos</text><text class="d-label" style="--i:4" x="224" y="324" text-anchor="middle">and .../complete</text>
+<g class="d-node cmd" style="--i:4"><rect x="288" y="250" width="180" height="104"/><text class="d-text" x="378" y="276" text-anchor="middle">Upload svc</text><text class="d-item" x="300" y="302">- save row, check size</text><text class="d-item" x="300" y="322">- hand out part URLs</text><text class="d-item" x="300" y="342">- queue job on finish</text></g>
+<path class="d-edge accent" style="--i:5" d="M468 300H610"/><path class="d-arrow accent" style="--i:5" d="M604 294L612 300L604 306Z"/><path class="d-arrow accent" style="--i:5" d="M474 294L466 300L474 306Z"/><text class="d-label" style="--i:5" x="539" y="290" text-anchor="middle">save row, status</text>
+<path class="d-edge accent" style="--i:6" d="M378 354V400"/><path class="d-arrow accent" style="--i:6" d="M372 394L378 402L384 394Z"/><text class="d-label" style="--i:6" x="386" y="382">job</text>
+<g class="d-node furnace" style="--i:6"><rect x="288" y="400" width="180" height="56"/><text class="d-text" x="378" y="426" text-anchor="middle">Job queue</text><text class="d-sub" x="378" y="446" text-anchor="middle">videos to convert</text></g>
+<path class="d-line" style="--i:6" d="M468 428H478"/>
+<g class="d-note" style="--i:6"><rect x="478" y="387" width="124" height="82"/><text class="d-note-t" x="488" y="407">job message</text><text class="d-mono" x="488" y="429">video_id</text><text class="d-mono" x="488" y="447">raw_key</text></g>
+<path class="d-edge accent" style="--i:7" d="M378 456V502"/><path class="d-arrow accent" style="--i:7" d="M372 496L378 504L384 496Z"/><text class="d-label" style="--i:7" x="386" y="484">next job</text>
+<g class="d-node furnace" style="--i:7"><rect x="288" y="502" width="180" height="144"/><text class="d-text" x="378" y="528" text-anchor="middle">Transcoder</text><text class="d-item" x="300" y="554">- take one video job</text><text class="d-item" x="300" y="574">- cut into 4 s pieces</text><text class="d-item" x="300" y="594">- encode 3 qualities</text><text class="d-item" x="300" y="614">- save pieces + playlist</text><text class="d-item" x="300" y="634">- mark video ready</text></g>
+<path class="d-edge accent" style="--i:8" d="M468 512H610"/><path class="d-arrow accent" style="--i:8" d="M604 506L612 512L604 518Z"/><text class="d-label" style="--i:8" x="539" y="502" text-anchor="middle">set ready</text>
+<path class="d-edge accent" style="--i:9" d="M468 600H534V700H610"/><path class="d-arrow accent" style="--i:9" d="M604 694L612 700L604 706Z"/><path class="d-arrow accent" style="--i:9" d="M474 594L466 600L474 606Z"/><text class="d-label" style="--i:9" x="528" y="680" text-anchor="end">raw in, pieces out</text>
+<path class="d-line" style="--i:9" d="M680 648V664"/>
+<g class="d-note" style="--i:9"><rect x="560" y="556" width="190" height="92"/><text class="d-note-t" x="572" y="576">storage layout</text><text class="d-mono" x="572" y="598">raw/{id}/part-N</text><text class="d-mono" x="572" y="616">video/{id}/{q}/seg-N</text><text class="d-mono" x="572" y="634">video/{id}/master.m3u8</text></g>
+<g class="d-node chest" style="--i:9"><rect x="610" y="664" width="140" height="176"/><text class="d-text" x="680" y="694" text-anchor="middle">Blob storage</text><text class="d-item" x="622" y="760">- raw uploads</text><text class="d-item" x="622" y="780">- converted pieces</text><text class="d-item" x="622" y="800">- copies kept</text></g>
+<path class="d-edge accent" style="--i:10" d="M76 718H610"/><path class="d-arrow accent" style="--i:10" d="M604 712L612 718L604 724Z"/><text class="d-label" style="--i:10" x="180" y="708" text-anchor="middle">PUT parts (URL)</text>
+<path class="d-edge alt" style="--i:11" d="M76 790H288"/><path class="d-arrow alt" style="--i:11" d="M282 784L290 790L282 796Z"/><path class="d-arrow alt" style="--i:11" d="M82 784L74 790L82 796Z"/><text class="d-label" style="--i:11" x="182" y="780" text-anchor="middle">GET playlist, pieces</text>
+<g class="d-node" style="--i:11"><rect x="288" y="740" width="180" height="104"/><text class="d-text" x="378" y="766" text-anchor="middle">CDN</text><text class="d-item" x="300" y="792">- keep popular pieces</text><text class="d-item" x="300" y="812">- serve from nearby</text><text class="d-item" x="300" y="832">- ask storage on miss</text></g>
+<path class="d-edge alt" style="--i:12" d="M468 800H610"/><path class="d-arrow alt" style="--i:12" d="M604 794L612 800L604 806Z"/><path class="d-arrow alt" style="--i:12" d="M474 794L466 800L474 806Z"/><text class="d-label" style="--i:12" x="539" y="790" text-anchor="middle">on miss</text>
+<path class="d-line" style="--i:12" d="M378 844V872"/>
+<g class="d-note" style="--i:12"><rect x="288" y="872" width="180" height="92"/><text class="d-note-t" x="300" y="892">CDN cache</text><text class="d-mono" x="300" y="914">{id}/{q}/seg-N</text><text class="d-mono" x="300" y="932">-> video piece</text><text class="d-mono" x="300" y="950">TTL 1 year</text></g>
+<rect class="d-packet" x="-6" y="-6" width="12" height="12" opacity="0"><animateMotion dur="8s" begin="1.6s" repeatCount="indefinite" keyPoints="0;1;1" keyTimes="0;.4;1" calcMode="linear" path="M76 718H610"/><animate attributeName="opacity" dur="8s" begin="1.6s" repeatCount="indefinite" values="0;1;1;0;0" keyTimes="0;.02;.38;.4;1"/></rect>
+<rect class="d-packet alt" x="-6" y="-6" width="12" height="12" opacity="0"><animateMotion dur="8s" begin="1.6s" repeatCount="indefinite" keyPoints="0;0;1;1" keyTimes="0;.4;.7;1" calcMode="linear" path="M76 790H288"/><animate attributeName="opacity" dur="8s" begin="1.6s" repeatCount="indefinite" values="0;0;1;1;0;0" keyTimes="0;.4;.41;.69;.7;1"/></rect>
+              </svg>
+            </div>
+            <figcaption>The complete system. Gold = uploading and converting, cyan = watching. Video bytes go straight between the client and storage or the CDN, never through our services.</figcaption>
+            <button class="replay" type="button" aria-label="Replay diagram animation">Replay</button>
+          </figure>
+
+          <div class="next reveal">
+            <h4>What you could add next</h4>
+            <ul class="next-list">
+              <li>Encoding chunks of a long video in parallel.</li>
+              <li>Thumbnails and subtitles made by extra workers.</li>
+              <li>Copying the most popular videos to more regions.</li>
+            </ul>
+          </div>
+        </section>
+
+        <section class="sec reveal" id="2026-11-14-video-streaming-sec-tips">
+          <h3>Interview tips</h3>
+          <dl class="qa">
+            <div><dt>Why cut videos into segments?</dt><dd>Playback starts after one segment, quality can change between segments, and small files cache well.</dd></div>
+            <div><dt>What if a worker dies mid-conversion?</dt><dd>The job returns to the queue for another worker.</dd></div>
+            <div><dt>What about a viral video?</dt><dd>The CDN serves its segments from cache, so storage sees very few requests.</dd></div>
+          </dl>
+          <h4>Common mistakes</h4>
+          <ul class="mistakes">
+            <li>Sending video bytes through the app servers.</li>
+            <li>Serving one big file, with no conversion step.</li>
+          </ul>
+          <aside class="callout tip">
+            <span class="callout-label">Interview tip</span>
+            <p>Say early that video bytes bypass your servers.</p>
+          </aside>
+          <aside class="callout confidence">
+            <span class="callout-label">Confidence note</span>
+            <p>The sizes, segment length and bitrate are assumptions. HLS and MPEG-DASH are both valid.</p>
+          </aside>
+        </section>
+
+        <p class="sources">Sources: Hello Interview's <a href="https://www.hellointerview.com/learn/system-design/problem-breakdowns/youtube">YouTube breakdown</a> and delivery framework; Alex Xu, <em>System Design Interview Vol. 1</em>, chapter "Design YouTube"; <a href="https://www.rfc-editor.org/rfc/rfc8216">RFC 8216, HTTP Live Streaming</a>; AWS docs, <a href="https://docs.aws.amazon.com/AmazonS3/latest/userguide/mpuoverview.html">S3 multipart upload</a>. This is a common approach, not a claim about any company's internals.</p>
+      </div>
+    </article>
     <article class="entry" id="2026-11-13-ticket-booking" data-topic="Ticket booking" data-domain="Counters &amp; limits" data-date="2026-11-13" data-level="3">
       <header class="entry-head">
         <div class="entry-meta">
