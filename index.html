@@ -420,6 +420,7 @@ dfn.term{font-style:normal;border-bottom:2px dotted var(--accent);cursor:help}
       <h2><svg viewBox="0 0 12 12" aria-hidden="true"><path fill="#7A4A2A" d="M0 2h12v9H0z"/><path fill="#A86A3C" d="M1 3h10v3H1zM1 7h10v3H1z"/><path fill="#E9B526" d="M5 5h2v3H5z"/><path fill="#4A2C18" d="M0 6h5v1H0zM7 6h5v1H7z"/></svg>Archive</h2>
       <ol class="toc">
         <!-- TOC -->
+        <li><a href="#2026-11-17-log-aggregation"><time datetime="2026-11-17">2026-11-17</time><span>Log aggregation: batch, queue, then store by day</span></a></li>
         <li><a href="#2026-11-16-product-search"><time datetime="2026-11-16">2026-11-16</time><span>Product search: a word index beside the database</span></a></li>
         <li><a href="#2026-11-15-live-comments"><time datetime="2026-11-15">2026-11-15</time><span>Live comments: save first, then fan out one batch a second</span></a></li>
         <li><a href="#2026-11-14-video-streaming"><time datetime="2026-11-14">2026-11-14</time><span>Video streaming: convert once, play in pieces from a nearby CDN</span></a></li>
@@ -448,6 +449,244 @@ dfn.term{font-style:normal;border-bottom:2px dotted var(--accent);cursor:help}
 
   <main id="entries" tabindex="-1">
     <!-- ENTRIES -->
+    <article class="entry" id="2026-11-17-log-aggregation" data-topic="Log aggregation" data-domain="Write-heavy logging" data-date="2026-11-17" data-level="2">
+      <header class="entry-head">
+        <div class="entry-meta">
+          <span class="chip">Write-heavy logging</span>
+          <span class="level" title="Difficulty: level 2 of 3">Lv 2</span>
+          <time datetime="2026-11-17">17 Nov 2026</time>
+          <span class="read"><span class="read-time">4</span> min read</span>
+        </div>
+        <h2 class="entry-title">Design a log aggregation system</h2>
+        <p class="lede">Hundreds of services each print thousands of log lines a second. At 3 a.m. something breaks, and an engineer needs to find the one error line from the last ten minutes. Where do all those lines go?</p>
+        <nav class="steps" aria-label="Sections of this design">
+          <a href="#2026-11-17-log-aggregation-sec-functional">Features</a>
+          <a href="#2026-11-17-log-aggregation-sec-nonfunctional">Qualities</a>
+          <a href="#2026-11-17-log-aggregation-sec-entities">Entities</a>
+          <a href="#2026-11-17-log-aggregation-sec-api">API</a>
+          <a href="#2026-11-17-log-aggregation-sec-hld">Design</a>
+          <a href="#2026-11-17-log-aggregation-sec-deepdives">Deep dives</a>
+          <a href="#2026-11-17-log-aggregation-sec-tips">Tips</a>
+        </nav>
+      </header>
+
+      <div class="prose">
+        <details class="legend">
+          <summary>Legend <span class="hint">7 terms used below</span></summary>
+          <dl>
+            <div><dt>Log line</dt><dd>One message a program writes about what it just did, such as an error or a user action.</dd></div>
+            <div><dt>Batch</dt><dd>Many log lines bundled into one request, so we send fewer, bigger requests.</dd></div>
+            <div><dt>Cursor</dt><dd>A bookmark that says where the last page of a list ended, so the next request continues from there.</dd></div>
+            <div><dt>API gateway</dt><dd>The single front door that sends each request to the right service.</dd></div>
+            <div><dt>Queue</dt><dd>A line of messages. One service adds to it, another takes from it later, so neither has to wait for the other.</dd></div>
+            <div><dt>Partition</dt><dd>One slice of a big table, here one day of logs, that can be searched or deleted on its own.</dd></div>
+            <div><dt>Replica</dt><dd>A live copy of a database. It takes over if the main one fails.</dd></div>
+          </dl>
+        </details>
+
+        <section class="sec reveal" id="2026-11-17-log-aggregation-sec-functional">
+          <h3>Functional requirements</h3>
+          <ul class="reqs">
+            <li>Services send their <dfn class="term" title="One message a program writes about what it just did, such as an error or a user action.">log lines</dfn> to one central place.</li>
+            <li>Engineers search lines by service, time range and a word.</li>
+          </ul>
+          <p class="out">Out of scope: dashboards, alerts, metrics, tracing, access control.</p>
+        </section>
+
+        <section class="sec reveal" id="2026-11-17-log-aggregation-sec-nonfunctional">
+          <h3>Non-functional requirements</h3>
+          <ul class="reqs nfr">
+            <li><strong>Handles huge, bursty writes.</strong> Logs are written constantly, and most of all during an outage.</li>
+            <li><strong>Rarely loses lines.</strong> The line you need is usually the one right before the crash.</li>
+            <li><strong>Search is fast enough.</strong> A few seconds, even with weeks of data.</li>
+            <li><strong>Fresh within seconds.</strong> A new line should be searchable almost at once, but a short delay is fine.</li>
+          </ul>
+        </section>
+
+        <section class="sec reveal" id="2026-11-17-log-aggregation-sec-entities">
+          <h3>Core entities</h3>
+          <ul class="entities">
+            <li><strong>Log line:</strong> id, service, time, level, message.</li>
+            <li><strong>Batch:</strong> the lines sent together in one request.</li>
+          </ul>
+        </section>
+
+        <section class="sec reveal" id="2026-11-17-log-aggregation-sec-api">
+          <h3>API design</h3>
+          <div class="api-list">
+            <div class="api">
+              <div class="api-sig"><span class="method">POST</span><code>/logs</code></div>
+              <p>Sends one <dfn class="term" title="Many log lines bundled into one request, so we send fewer, bigger requests.">batch</dfn>, at most 1,000 lines or 1 MB. 413 if bigger, 429 if we are overloaded and the sender should back off.</p>
+              <div class="io">
+                <div><span class="io-l">Request body</span><pre>{ "lines": [ { "line_id": "web-7:1042",
+    "service": "checkout",
+    "time": "2026-11-17T02:58:03Z",
+    "level": "ERROR",
+    "message": "payment timeout" } ] }</pre></div>
+                <div><span class="io-l">Response 202 Accepted</span><pre>{ "accepted": 1 }</pre></div>
+              </div>
+            </div>
+            <div class="api">
+              <div class="api-sig"><span class="method get">GET</span><code>/logs?service=&amp;from=&amp;to=&amp;q=&amp;cursor=</code></div>
+              <p>One page of 100 lines, newest first, plus a <dfn class="term" title="A bookmark that says where the last page of a list ended, so the next request continues from there.">cursor</dfn>. 400 if the time range is missing or longer than 7 days.</p>
+              <div class="io">
+                <div><span class="io-l">Request body</span><pre>(none)</pre></div>
+                <div><span class="io-l">Response 200 OK</span><pre>{ "lines": [ { "line_id": "web-7:1042",
+    "time": "2026-11-17T02:58:03Z",
+    "message": "payment timeout" } ],
+  "next_cursor": "c_100" }</pre></div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="sec" id="2026-11-17-log-aggregation-sec-hld">
+          <h3>High-level design</h3>
+          <div class="reveal">
+            <p>Assume 50,000 lines a second at about 200 bytes each. Servers are identical, keep no data, and sit behind a load balancer.</p>
+            <h4>1. Send logs</h4>
+            <p>Sending one request per line would mean 50,000 requests a second. So a small log agent beside each service collects lines and sends a batch of about 500, which is only about 100 requests a second. The agent gives each line an id made of its machine name and a counter, like <code>web-7:1042</code>. The server checks the batch, saves it and answers 202: accepted, not yet searchable.</p>
+            <h4>2. Search logs</h4>
+            <p>The server reads one service's lines in a time range, keeps those with the word, and returns a page.</p>
+            <p>The size decides the store. 50,000 lines of 200 bytes is 10 MB a second, about 860 GB a day, or about 26 TB for 30 days. That is far too many writes for a normal database, so we use a store built for heavy appends, such as Cassandra or ClickHouse.</p>
+            <div class="table-scroll">
+              <table class="schema">
+                <caption>Table: log_lines</caption>
+                <thead><tr><th>Column</th><th>Type</th><th>Note</th></tr></thead>
+                <tbody>
+                  <tr><td>line_id</td><td>text</td><td>primary key, made by the agent</td></tr>
+                  <tr><td>service, time</td><td>text, timestamp</td><td>index: the main query filters on both</td></tr>
+                  <tr><td>level, message</td><td>text</td><td>the words people search</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <figure class="diagram-fig">
+            <div class="diagram-scroll" tabindex="0" role="group" aria-label="Diagram: simple log aggregation. Scrollable on small screens.">
+              <svg class="diagram" viewBox="0 0 760 400" role="img" aria-labelledby="2026-11-17-log-aggregation-d1-t 2026-11-17-log-aggregation-d1-d">
+                <title id="2026-11-17-log-aggregation-d1-t">Simple log aggregation</title>
+                <desc id="2026-11-17-log-aggregation-d1-d">The client sends log batches and searches to the app servers. The app servers save batches in the log store and read lines back from it. A sign shows the log lines table.</desc>
+<g class="d-node grass" style="--i:0"><rect x="8" y="177" width="82" height="60"/><text class="d-text" x="49" y="212" text-anchor="middle">Client</text></g>
+<path class="d-edge" style="--i:1" d="M90 207H180"/><path class="d-arrow" style="--i:1" d="M174 201L182 207L174 213Z"/><text class="d-label" style="--i:1" x="135" y="197" text-anchor="middle">send, search</text>
+<g class="d-node cmd" style="--i:2"><rect x="180" y="160" width="190" height="94"/><text class="d-text" x="275" y="186" text-anchor="middle">App servers</text><text class="d-item" x="192" y="212">- check each batch</text><text class="d-item" x="192" y="232">- save lines</text><text class="d-item" x="192" y="252">- find lines, one page</text></g>
+<path class="d-edge accent" style="--i:3" d="M370 190H570"/><path class="d-arrow accent" style="--i:3" d="M564 184L572 190L564 196Z"/><text class="d-label" style="--i:3" x="470" y="180" text-anchor="middle">save batch</text>
+<path class="d-edge alt" style="--i:4" d="M370 228H570"/><path class="d-arrow alt" style="--i:4" d="M564 222L572 228L564 234Z"/><path class="d-arrow alt" style="--i:4" d="M376 222L368 228L376 234Z"/><text class="d-label" style="--i:4" x="470" y="218" text-anchor="middle">filter, lines</text>
+<g class="d-node chest" style="--i:3"><rect x="570" y="160" width="170" height="94"/><text class="d-text" x="655" y="192" text-anchor="middle">Log store</text><text class="d-sub" x="655" y="214" text-anchor="middle">built for appends</text></g>
+<path class="d-line" style="--i:3" d="M655 254V296"/>
+<g class="d-note" style="--i:3"><rect x="560" y="296" width="190" height="92"/><text class="d-note-t" x="572" y="316">log lines table</text><text class="d-mono" x="572" y="338">line_id  PK</text><text class="d-mono" x="572" y="356">service, time</text><text class="d-mono" x="572" y="374">level, message</text></g>
+<rect class="d-packet" x="-6" y="-6" width="12" height="12" opacity="0"><animateMotion dur="8s" begin="1.4s" repeatCount="indefinite" keyPoints="0;1;1" keyTimes="0;.4;1" calcMode="linear" path="M90 207H275V190H570"/><animate attributeName="opacity" dur="8s" begin="1.4s" repeatCount="indefinite" values="0;1;1;0;0" keyTimes="0;.02;.38;.4;1"/></rect>
+<rect class="d-packet alt" x="-6" y="-6" width="12" height="12" opacity="0"><animateMotion dur="8s" begin="1.4s" repeatCount="indefinite" keyPoints="0;0;1;1" keyTimes="0;.4;.8;1" calcMode="linear" path="M90 207H275V228H570"/><animate attributeName="opacity" dur="8s" begin="1.4s" repeatCount="indefinite" values="0;0;1;1;0;0" keyTimes="0;.4;.41;.79;.8;1"/></rect>
+              </svg>
+            </div>
+            <figcaption>The starting point: one store takes batches in and answers searches. Gold = sending logs, cyan = searching. The deep dives fix what breaks at this size.</figcaption>
+            <button class="replay" type="button" aria-label="Replay diagram animation">Replay</button>
+          </figure>
+
+          <aside class="callout why reveal">
+            <span class="callout-label">Why</span>
+            <p><strong>Why accept 202 and not wait for the save?</strong> Services must never slow down because logging is slow.</p>
+          </aside>
+        </section>
+
+        <section class="sec" id="2026-11-17-log-aggregation-sec-deepdives">
+          <h3>Deep dives</h3>
+          <div class="dive reveal">
+            <h4>How do we handle bursts without losing lines?</h4>
+            <p>During an outage every service logs more, so writes spike exactly when logs matter most.</p>
+            <ol class="options">
+              <li><strong>Write straight to the store.</strong> Simple, but a spike overloads the store and lines get dropped.</li>
+              <li><strong>Buy a store big enough for the peak.</strong> Works, but it sits mostly idle and costs a lot.</li>
+              <li class="pick"><strong>Put a queue in between.</strong><span class="pick-tag">Pick</span> The ingest service adds each batch to a <dfn class="term" title="A line of messages. One service adds to it, another takes from it later, so neither has to wait for the other.">queue</dfn> and replies at once.</li>
+            </ol>
+            <p>A writer worker takes batches at a steady pace, so a spike just makes the queue longer. If the store is down, batches wait. A batch may be delivered twice, so the writer skips any <code>line_id</code> already saved. If the queue is unreachable, the agent keeps lines on its local disk and retries. A rare loss and a few seconds of delay are acceptable for logs, unlike payments.</p>
+          </div>
+
+          <div class="dive reveal">
+            <h4>How do we search terabytes quickly?</h4>
+            <p>Most searches ask for one service in a recent window, but 26 TB is stored.</p>
+            <ol class="options">
+              <li><strong>Scan everything.</strong> Reads all 26 TB for every search, so it takes minutes.</li>
+              <li><strong>Index every word.</strong> Searches are fast, but the index grows as big as the data and slows every write.</li>
+              <li class="pick"><strong>Split by day, sort by service and time.</strong><span class="pick-tag">Pick</span> Each day is its own <dfn class="term" title="One slice of a big table, here one day of logs, that can be searched or deleted on its own.">partition</dfn>.</li>
+            </ol>
+            <p>A search for "checkout, last hour" opens one day piece and reads a thin slice, then scans only that slice for the word. The same split makes deleting easy: the store expires whole days older than 30 days (an assumed policy) instead of deleting line by line.</p>
+          </div>
+
+          <div class="reveal">
+            <h4>Final design</h4>
+            <p>The dives added a queue, a writer worker and day-split storage. Ingest and query are separate services because writes vastly outnumber searches, so each side scales alone. An <dfn class="term" title="The single front door that sends each request to the right service.">API gateway</dfn> routes by path.</p>
+            <p>The store keeps a <dfn class="term" title="A live copy of a database. It takes over if the main one fails.">replica</dfn> that takes over on failure.</p>
+          </div>
+
+          <figure class="diagram-fig" id="2026-11-17-log-aggregation-final">
+            <div class="diagram-scroll" tabindex="0" role="group" aria-label="Diagram: the final log aggregation design. Scrollable on small screens.">
+              <svg class="diagram" viewBox="0 0 760 740" role="img" aria-labelledby="2026-11-17-log-aggregation-d2-t 2026-11-17-log-aggregation-d2-d">
+                <title id="2026-11-17-log-aggregation-d2-t">Final log aggregation design</title>
+                <desc id="2026-11-17-log-aggregation-d2-d">The client talks to an API gateway. The gateway sends GET logs to the Query service and POST logs to the Ingest service. The Ingest service puts each batch on a queue. A writer worker takes batches from the queue and saves lines in the log store, which copies writes to a replica. The Query service reads lines from the log store. Signs show the log lines table and the batch queue.</desc>
+<g class="d-node grass" style="--i:0"><rect x="10" y="335" width="80" height="60"/><text class="d-text" x="50" y="370" text-anchor="middle">Client</text></g>
+<path class="d-edge" style="--i:1" d="M90 365H110"/><path class="d-arrow" style="--i:1" d="M104 359L112 365L104 371Z"/><path class="d-arrow" style="--i:1" d="M96 359L88 365L96 371Z"/>
+<g class="d-node" style="--i:1"><rect x="110" y="30" width="110" height="670"/><text class="d-text" x="165" y="355" text-anchor="middle">API</text><text class="d-text" x="165" y="373" text-anchor="middle">gateway</text><text class="d-item" x="118" y="401">- one door</text><text class="d-item" x="118" y="421">- by path</text></g>
+<path class="d-edge alt" style="--i:2" d="M220 92H300"/><path class="d-arrow alt" style="--i:2" d="M294 86L302 92L294 98Z"/><path class="d-arrow alt" style="--i:2" d="M226 86L218 92L226 98Z"/><text class="d-label" style="--i:2" x="260" y="82" text-anchor="middle">GET</text><text class="d-label" style="--i:2" x="260" y="114" text-anchor="middle">/logs</text>
+<g class="d-node cmd" style="--i:2"><rect x="300" y="30" width="190" height="124"/><text class="d-text" x="395" y="56" text-anchor="middle">Query svc</text><text class="d-item" x="312" y="82">- check the filters</text><text class="d-item" x="312" y="102">- pick the day pieces</text><text class="d-item" x="312" y="122">- scan, newest first</text><text class="d-item" x="312" y="142">- return one page</text></g>
+<path class="d-edge alt" style="--i:3" d="M490 92H530V232H590"/><path class="d-arrow alt" style="--i:3" d="M584 226L592 232L584 238Z"/><path class="d-arrow alt" style="--i:3" d="M498 86L490 92L498 98Z"/><text class="d-label" style="--i:3" x="498" y="80">filter, lines</text>
+<g class="d-node chest" style="--i:4"><rect x="590" y="215" width="160" height="80"/><text class="d-text" x="670" y="248" text-anchor="middle">Log store</text><text class="d-sub" x="670" y="272" text-anchor="middle">one piece per day</text></g>
+<path class="d-line" style="--i:4" d="M670 204V215"/>
+<g class="d-note" style="--i:4"><rect x="550" y="100" width="200" height="104"/><text class="d-note-t" x="562" y="120">log lines table</text><text class="d-mono" x="562" y="142">line_id  PK</text><text class="d-mono" x="562" y="160">index  service+time</text><text class="d-mono" x="562" y="178">level, message</text><text class="d-mono" x="562" y="196">expires after 30 days</text></g>
+<path class="d-edge accent" style="--i:5" d="M490 280H590"/><path class="d-arrow accent" style="--i:5" d="M584 274L592 280L584 286Z"/><text class="d-label" style="--i:5" x="540" y="270" text-anchor="middle">save batch</text>
+<g class="d-node furnace" style="--i:5"><rect x="300" y="243" width="190" height="74"/><text class="d-text" x="395" y="269" text-anchor="middle">Writer</text><text class="d-item" x="312" y="295">- take a batch</text><text class="d-item" x="312" y="315">- save, skip repeats</text></g>
+<path class="d-edge" style="--i:6" d="M670 295V350"/><path class="d-arrow" style="--i:6" d="M664 344L670 352L676 344Z"/><text class="d-label" style="--i:6" x="660" y="328" text-anchor="end">copies writes</text>
+<g class="d-node chest" style="--i:6"><rect x="590" y="350" width="160" height="64"/><text class="d-text" x="670" y="378" text-anchor="middle">Replica</text><text class="d-sub" x="670" y="398" text-anchor="middle">copy of store</text></g>
+<path class="d-edge accent" style="--i:7" d="M450 460V317"/><path class="d-arrow accent" style="--i:7" d="M444 323L450 315L456 323Z"/><text class="d-label" style="--i:7" x="458" y="395">take batch</text>
+<g class="d-node furnace" style="--i:7"><rect x="300" y="460" width="190" height="60"/><text class="d-text" x="395" y="486" text-anchor="middle">Queue</text><text class="d-sub" x="395" y="506" text-anchor="middle">waiting batches</text></g>
+<path class="d-line" style="--i:7" d="M490 490H520"/>
+<g class="d-note" style="--i:7"><rect x="520" y="451" width="220" height="78"/><text class="d-note-t" x="532" y="471">batch queue</text><text class="d-mono" x="532" y="493">msg  batch of lines</text><text class="d-mono" x="532" y="511">     with line_ids</text></g>
+<path class="d-edge accent" style="--i:8" d="M340 590V520"/><path class="d-arrow accent" style="--i:8" d="M334 526L340 518L346 526Z"/><text class="d-label" style="--i:8" x="348" y="560">add batch</text>
+<path class="d-edge accent" style="--i:9" d="M220 647H300"/><path class="d-arrow accent" style="--i:9" d="M294 641L302 647L294 653Z"/><path class="d-arrow accent" style="--i:9" d="M226 641L218 647L226 653Z"/><text class="d-label" style="--i:9" x="260" y="637" text-anchor="middle">POST</text><text class="d-label" style="--i:9" x="260" y="669" text-anchor="middle">/logs</text>
+<g class="d-node cmd" style="--i:9"><rect x="300" y="590" width="190" height="114"/><text class="d-text" x="395" y="616" text-anchor="middle">Ingest svc</text><text class="d-item" x="312" y="642">- check each line</text><text class="d-item" x="312" y="662">- too big 413, busy 429</text><text class="d-item" x="312" y="682">- queue it, answer 202</text></g>
+<rect class="d-packet" x="-6" y="-6" width="12" height="12" opacity="0"><animateMotion dur="8s" begin="1.6s" repeatCount="indefinite" keyPoints="0;1;1" keyTimes="0;.5;1" calcMode="linear" path="M90 365H165V647H340V490H450V280H590"/><animate attributeName="opacity" dur="8s" begin="1.6s" repeatCount="indefinite" values="0;1;1;0;0" keyTimes="0;.02;.48;.5;1"/></rect>
+<rect class="d-packet alt" x="-6" y="-6" width="12" height="12" opacity="0"><animateMotion dur="8s" begin="1.6s" repeatCount="indefinite" keyPoints="0;0;1;1" keyTimes="0;.5;.9;1" calcMode="linear" path="M90 365H165V92H530V232H590"/><animate attributeName="opacity" dur="8s" begin="1.6s" repeatCount="indefinite" values="0;0;1;1;0;0" keyTimes="0;.5;.51;.89;.9;1"/></rect>
+              </svg>
+            </div>
+            <figcaption>The complete system. Gold = a batch of log lines travelling from the client into the store, cyan = a search. Ingest and query are separate services because writes vastly outnumber searches.</figcaption>
+            <button class="replay" type="button" aria-label="Replay diagram animation">Replay</button>
+          </figure>
+
+          <div class="next reveal">
+            <h4>What you could add next</h4>
+            <ul class="next-list">
+              <li>Move logs older than a week to cheaper storage.</li>
+              <li>Split the store across machines by service once one cluster is full.</li>
+              <li>Alerts that fire when a pattern such as "ERROR" spikes.</li>
+            </ul>
+          </div>
+        </section>
+
+        <section class="sec reveal" id="2026-11-17-log-aggregation-sec-tips">
+          <h3>Interview tips</h3>
+          <dl class="qa">
+            <div><dt>What if one service floods the system with logs?</dt><dd>Rate limit per service: answer 429 and let its agent back off and buffer.</dd></div>
+            <div><dt>How do you avoid duplicate lines?</dt><dd>The queue can deliver twice, so the writer skips ids it has already saved.</dd></div>
+            <div><dt>Why not just use a SQL database?</dt><dd>It cannot take this many appends a second, and deleting old rows one by one is slow.</dd></div>
+          </dl>
+          <h4>Common mistakes</h4>
+          <ul class="mistakes">
+            <li>Sending one request per line.</li>
+            <li>Making services wait for the log save before they carry on.</li>
+          </ul>
+          <aside class="callout tip">
+            <span class="callout-label">Interview tip</span>
+            <p>Start with the numbers: they justify batching, a queue and day pieces.</p>
+          </aside>
+          <aside class="callout confidence">
+            <span class="callout-label">Confidence note</span>
+            <p>Traffic, batch size and the 30-day limit are assumptions. Indexing every word (as Elasticsearch-style tools do) is also a valid answer. Hello Interview's page was not re-read this run.</p>
+          </aside>
+        </section>
+
+        <p class="sources">Sources: Hello Interview's delivery framework; Alex Xu, <em>System Design Interview</em>, distributed message queue and metrics chapters; Martin Kleppmann, <em>Designing Data-Intensive Applications</em>, logs and partitioning chapters; <a href="https://cassandra.apache.org/doc/latest/">Apache Cassandra documentation</a>. This is a common approach, not a claim about any company's internals.</p>
+      </div>
+    </article>
     <article class="entry" id="2026-11-16-product-search" data-topic="Product search" data-domain="Search" data-date="2026-11-16" data-level="2">
       <header class="entry-head">
         <div class="entry-meta">
