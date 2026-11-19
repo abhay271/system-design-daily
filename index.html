@@ -420,6 +420,7 @@ dfn.term{font-style:normal;border-bottom:2px dotted var(--accent);cursor:help}
       <h2><svg viewBox="0 0 12 12" aria-hidden="true"><path fill="#7A4A2A" d="M0 2h12v9H0z"/><path fill="#A86A3C" d="M1 3h10v3H1zM1 7h10v3H1z"/><path fill="#E9B526" d="M5 5h2v3H5z"/><path fill="#4A2C18" d="M0 6h5v1H0zM7 6h5v1H7z"/></svg>Archive</h2>
       <ol class="toc">
         <!-- TOC -->
+        <li><a href="#2026-11-19-upvoted-feed"><time datetime="2026-11-19">2026-11-19</time><span>Upvoted feed: count votes in batches, rank in a cache</span></a></li>
         <li><a href="#2026-11-18-code-judge"><time datetime="2026-11-18">2026-11-18</time><span>Online code judge: queue the code, run it in a sandbox</span></a></li>
         <li><a href="#2026-11-17-log-aggregation"><time datetime="2026-11-17">2026-11-17</time><span>Log aggregation: batch, queue, then store by day</span></a></li>
         <li><a href="#2026-11-16-product-search"><time datetime="2026-11-16">2026-11-16</time><span>Product search: a word index beside the database</span></a></li>
@@ -450,6 +451,260 @@ dfn.term{font-style:normal;border-bottom:2px dotted var(--accent);cursor:help}
 
   <main id="entries" tabindex="-1">
     <!-- ENTRIES -->
+    <article class="entry" id="2026-11-19-upvoted-feed" data-topic="Upvoted feed" data-domain="Feeds" data-date="2026-11-19" data-level="2">
+      <header class="entry-head">
+        <div class="entry-meta">
+          <span class="chip">Feeds</span>
+          <span class="level" title="Difficulty: level 2 of 3">Lv 2</span>
+          <time datetime="2026-11-19">19 Nov 2026</time>
+          <span class="read"><span class="read-time">4</span> min read</span>
+        </div>
+        <h2 class="entry-title">Design a community feed with upvotes</h2>
+        <p class="lede">On a forum site people post, everyone votes, and the best posts rise to the top. The hard part: votes arrive constantly, yet the page must load fast and count each person once.</p>
+        <nav class="steps" aria-label="Sections of this design">
+          <a href="#2026-11-19-upvoted-feed-sec-functional">Features</a>
+          <a href="#2026-11-19-upvoted-feed-sec-nonfunctional">Qualities</a>
+          <a href="#2026-11-19-upvoted-feed-sec-entities">Entities</a>
+          <a href="#2026-11-19-upvoted-feed-sec-api">API</a>
+          <a href="#2026-11-19-upvoted-feed-sec-hld">Design</a>
+          <a href="#2026-11-19-upvoted-feed-sec-deepdives">Deep dives</a>
+          <a href="#2026-11-19-upvoted-feed-sec-tips">Tips</a>
+        </nav>
+      </header>
+
+      <div class="prose">
+        <details class="legend">
+          <summary>Legend <span class="hint">8 terms used below</span></summary>
+          <dl>
+            <div><dt>Idempotent</dt><dd>Doing the same request twice has the same result as doing it once.</dd></div>
+            <div><dt>Cursor</dt><dd>A bookmark that says where the last page ended, so the next request continues from there.</dd></div>
+            <div><dt>Queue</dt><dd>A line of messages. One service adds to it, another takes from it later, so neither has to wait for the other.</dd></div>
+            <div><dt>Worker</dt><dd>A background program that takes jobs from a queue and does them.</dd></div>
+            <div><dt>Cache</dt><dd>A fast store, kept in memory, that holds answers we need often so we skip the slower database.</dd></div>
+            <div><dt>Sorted set</dt><dd>A cache structure that keeps items ordered by a score, so "give me the top 25" is one quick call.</dd></div>
+            <div><dt>API gateway</dt><dd>The single front door that sends each request to the right service.</dd></div>
+            <div><dt>Replica</dt><dd>A live copy of a database. It takes over if the main one fails.</dd></div>
+          </dl>
+        </details>
+
+        <section class="sec reveal" id="2026-11-19-upvoted-feed-sec-functional">
+          <h3>Functional requirements</h3>
+          <ul class="reqs">
+            <li>Create a post in a community.</li>
+            <li>Upvote or downvote a post.</li>
+            <li>See a community's feed, with the best posts first.</li>
+          </ul>
+          <p class="out">Out of scope: comments, moderation, search, user profiles.</p>
+        </section>
+
+        <section class="sec reveal" id="2026-11-19-upvoted-feed-sec-nonfunctional">
+          <h3>Non-functional requirements</h3>
+          <ul class="reqs nfr">
+            <li><strong>Fast feed.</strong> People scroll far more often than they vote.</li>
+            <li><strong>One vote per person.</strong> Double counting makes the ranking unfair.</li>
+            <li><strong>Survives a viral post.</strong> Thousands of votes can hit one post at once.</li>
+            <li><strong>Counts may lag a little.</strong> A score that is a few seconds old is fine.</li>
+          </ul>
+        </section>
+
+        <section class="sec reveal" id="2026-11-19-upvoted-feed-sec-entities">
+          <h3>Core entities</h3>
+          <ul class="entities">
+            <li><strong>Post:</strong> id, community, author, title, vote counts, created time.</li>
+            <li><strong>Vote:</strong> which user voted on which post, and whether it is +1 or -1.</li>
+          </ul>
+        </section>
+
+        <section class="sec reveal" id="2026-11-19-upvoted-feed-sec-api">
+          <h3>API design</h3>
+          <div class="api-list">
+            <div class="api">
+              <div class="api-sig"><span class="method">POST</span><code>/posts</code></div>
+              <p>Creates a post. 422 if the title is empty or over 300 characters (assumed limit). The author comes from the auth token.</p>
+              <div class="io">
+                <div><span class="io-l">Request body</span><pre>{ "community_id": "c_7",
+  "title": "My first post" }</pre></div>
+                <div><span class="io-l">Response 201 Created</span><pre>{ "post_id": "p_1001" }</pre></div>
+              </div>
+            </div>
+            <div class="api">
+              <div class="api-sig"><span class="method put">PUT</span><code>/posts/{id}/vote</code></div>
+              <p>Sets this user's vote: 1, -1, or 0 to take it back. It is <dfn class="term" title="Doing the same request twice has the same result as doing it once.">idempotent</dfn>, so a retry or double click cannot count twice. 404 if the post does not exist.</p>
+              <div class="io">
+                <div><span class="io-l">Request body</span><pre>{ "value": 1 }</pre></div>
+                <div><span class="io-l">Response 200 OK</span><pre>{ "post_id": "p_1001",
+  "your_vote": 1 }</pre></div>
+              </div>
+            </div>
+            <div class="api">
+              <div class="api-sig"><span class="method get">GET</span><code>/feed?community=c_7&amp;cursor=…</code></div>
+              <p>Returns one page of posts, best first. The <dfn class="term" title="A bookmark that says where the last page ended, so the next request continues from there.">cursor</dfn> is the last post's score and id, not a page number, because scores shift while you scroll.</p>
+              <div class="io">
+                <div><span class="io-l">Request body</span><pre>(none)</pre></div>
+                <div><span class="io-l">Response 200 OK</span><pre>{ "posts": [ { "post_id": "p_1001",
+    "title": "…", "score": 87 } ],
+  "next_cursor": "87_p_1001" }</pre></div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="sec" id="2026-11-19-upvoted-feed-sec-hld">
+          <h3>High-level design</h3>
+          <div class="reveal">
+            <p>Assume 1 million daily users who vote 10 times each: 10M votes a day, about 115 a second, maybe 600 at peak. One database handles that, so no sharding yet. Identical servers behind a load balancer.</p>
+            <h4>1. Create a post</h4>
+            <p>The server saves a row; its id comes from the database's auto-increment counter.</p>
+            <h4>2. Vote</h4>
+            <p>The server saves one row per (post, user) in a votes table. Making that pair the primary key is what stops a second vote from the same person. The post's up or down count changes too.</p>
+            <h4>3. Show the feed</h4>
+            <p>The simplest version sorts a community's posts by score and returns the first page. A common score uses net votes on a log scale (the 1,000th vote matters less than the 10th) plus a bonus for newer posts.</p>
+            <div class="table-scroll">
+              <table class="schema">
+                <caption>Tables: posts and votes</caption>
+                <thead><tr><th>Column</th><th>Type</th><th>Note</th></tr></thead>
+                <tbody>
+                  <tr><td>posts.post_id</td><td>bigint</td><td>primary key, auto-increment</td></tr>
+                  <tr><td>community_id, title, created_at</td><td>text, time</td><td>index (community_id, score) for the feed</td></tr>
+                  <tr><td>up, down, score</td><td>int, float</td><td>vote counts and the ranking score</td></tr>
+                  <tr><td>votes (post_id, user_id)</td><td>bigint</td><td>primary key on the pair; value is +1 or -1</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <figure class="diagram-fig">
+            <div class="diagram-scroll" tabindex="0" role="group" aria-label="Diagram: simple upvoted feed. Scrollable on small screens.">
+              <svg class="diagram" viewBox="0 0 760 410" role="img" aria-labelledby="2026-11-19-upvoted-feed-d1-t 2026-11-19-upvoted-feed-d1-d">
+                <title id="2026-11-19-upvoted-feed-d1-t">Simple upvoted feed</title>
+                <desc id="2026-11-19-upvoted-feed-d1-d">The client sends posts, votes and feed requests to the app servers. The app servers save post and vote rows in the database and read posts sorted by score. A sign shows the posts and votes tables.</desc>
+<g class="d-node grass" style="--i:0"><rect x="8" y="177" width="82" height="60"/><text class="d-text" x="49" y="212" text-anchor="middle">Client</text></g>
+<path class="d-edge" style="--i:1" d="M90 207H180"/><path class="d-arrow" style="--i:1" d="M174 201L182 207L174 213Z"/><path class="d-arrow" style="--i:1" d="M96 201L88 207L96 213Z"/><text class="d-label" style="--i:1" x="135" y="197" text-anchor="middle">post, vote</text><text class="d-label" style="--i:1" x="135" y="227" text-anchor="middle">feed</text>
+<g class="d-node cmd" style="--i:2"><rect x="180" y="160" width="190" height="94"/><text class="d-text" x="275" y="186" text-anchor="middle">App servers</text><text class="d-item" x="192" y="212">- save posts and votes</text><text class="d-item" x="192" y="232">- add up the votes</text><text class="d-item" x="192" y="252">- sort and return feed</text></g>
+<path class="d-edge accent" style="--i:3" d="M370 190H570"/><path class="d-arrow accent" style="--i:3" d="M564 184L572 190L564 196Z"/><text class="d-label" style="--i:3" x="470" y="180" text-anchor="middle">save rows</text>
+<path class="d-edge alt" style="--i:4" d="M370 228H570"/><path class="d-arrow alt" style="--i:4" d="M564 222L572 228L564 234Z"/><path class="d-arrow alt" style="--i:4" d="M376 222L368 228L376 234Z"/><text class="d-label" style="--i:4" x="470" y="218" text-anchor="middle">sort by score</text>
+<g class="d-node chest" style="--i:3"><rect x="570" y="160" width="170" height="94"/><text class="d-text" x="655" y="192" text-anchor="middle">Database</text><text class="d-sub" x="655" y="214" text-anchor="middle">posts and votes</text></g>
+<path class="d-line" style="--i:3" d="M655 254V296"/>
+<g class="d-note" style="--i:3"><rect x="560" y="296" width="190" height="102"/><text class="d-note-t" x="572" y="316">two tables</text><text class="d-mono" x="572" y="338">posts: post_id  PK</text><text class="d-mono" x="572" y="356">votes: post+user  PK</text><text class="d-mono" x="572" y="374">up, down, score</text></g>
+<rect class="d-packet" x="-6" y="-6" width="12" height="12" opacity="0"><animateMotion dur="8s" begin="1.4s" repeatCount="indefinite" keyPoints="0;1;1" keyTimes="0;.4;1" calcMode="linear" path="M90 207H275V190H570"/><animate attributeName="opacity" dur="8s" begin="1.4s" repeatCount="indefinite" values="0;1;1;0;0" keyTimes="0;.02;.38;.4;1"/></rect>
+<rect class="d-packet alt" x="-6" y="-6" width="12" height="12" opacity="0"><animateMotion dur="8s" begin="1.4s" repeatCount="indefinite" keyPoints="0;0;1;1" keyTimes="0;.4;.8;1" calcMode="linear" path="M90 207H275V228H570"/><animate attributeName="opacity" dur="8s" begin="1.4s" repeatCount="indefinite" values="0;0;1;1;0;0" keyTimes="0;.4;.41;.79;.8;1"/></rect>
+              </svg>
+            </div>
+            <figcaption>The starting point. Gold = saving a post or vote, cyan = loading the feed. The deep dives fix what breaks.</figcaption>
+            <button class="replay" type="button" aria-label="Replay diagram animation">Replay</button>
+          </figure>
+
+          <aside class="callout why reveal">
+            <span class="callout-label">Why</span>
+            <p><strong>Why not just count vote rows for every feed load?</strong> The feed is read far more than it is written, so the count should be worked out once at write time, not again on every read.</p>
+          </aside>
+        </section>
+
+        <section class="sec" id="2026-11-19-upvoted-feed-sec-deepdives">
+          <h3>Deep dives</h3>
+          <div class="dive reveal">
+            <h4>How do we count votes correctly, even for a viral post?</h4>
+            <p>One post can get hundreds of votes a second, and each user may vote only once.</p>
+            <ol class="options">
+              <li><strong>Add 1 to the post row on every vote.</strong> Simple, but a viral post's row becomes a queue of waiters, and a retry counts twice.</li>
+              <li><strong>Count vote rows on every read.</strong> Always right, far too slow.</li>
+              <li class="pick"><strong>Votes table as the truth, counts updated in batches.</strong><span class="pick-tag">Pick</span> Fast replies and no hot row.</li>
+            </ol>
+            <p>The vote service saves or changes the user's row, works out the change (+1, -1, or +2 for a flipped vote) and adds it to a <dfn class="term" title="A line of messages. One service adds to it, another takes from it later, so neither has to wait for the other.">queue</dfn>. A <dfn class="term" title="A background program that takes jobs from a queue and does them.">worker</dfn> adds up a batch of changes per post and writes each post once. If the queue is down, the vote is still saved and the worker recounts recent posts from the votes table later.</p>
+          </div>
+
+          <div class="dive reveal">
+            <h4>How do we keep the feed fast?</h4>
+            <p>The feed is the busiest request, and sorting a big table on every load gets slower.</p>
+            <ol class="options">
+              <li><strong>Query the database every time.</strong> Every scroll hits the main database.</li>
+              <li><strong>Cache each finished page.</strong> Fast, but every new vote makes pages stale.</li>
+              <li class="pick"><strong>A ranked list in the cache.</strong><span class="pick-tag">Pick</span> Keep each community's top posts in a <dfn class="term" title="A cache structure that keeps items ordered by a score, so &quot;give me the top 25&quot; is one quick call.">sorted set</dfn>.</li>
+            </ol>
+            <p>The feed service asks the <dfn class="term" title="A fast store, kept in memory, that holds answers we need often so we skip the slower database.">cache</dfn> for the next 25 ids after the cursor, then reads each post's card from the cache too. The worker, not the feed service, fills it: after each batch it sets the new scores, and once a minute it adds new posts. A new post can take a minute to appear, which is fine. If the cache is lost, the worker rebuilds it from the database.</p>
+          </div>
+
+          <div class="reveal">
+            <h4>Final design</h4>
+            <p>The dives added a queue, a score worker and a cache. Posting, voting and reading are separate services because reads vastly outnumber votes, and votes outnumber posts. An <dfn class="term" title="The single front door that sends each request to the right service.">API gateway</dfn> routes by path. The database has a <dfn class="term" title="A live copy of a database. It takes over if the main one fails.">replica</dfn> that takes over on failure.</p>
+          </div>
+
+          <figure class="diagram-fig" id="2026-11-19-upvoted-feed-final">
+            <div class="diagram-scroll" tabindex="0" role="group" aria-label="Diagram: the final upvoted feed design. Scrollable on small screens.">
+              <svg class="diagram" viewBox="0 0 760 816" role="img" aria-labelledby="2026-11-19-upvoted-feed-d2-t 2026-11-19-upvoted-feed-d2-d">
+                <title id="2026-11-19-upvoted-feed-d2-t">Final upvoted feed design</title>
+                <desc id="2026-11-19-upvoted-feed-d2-d">The client talks to an API gateway. POST posts goes to the Post service, which saves a row in the database. PUT vote goes to the Vote service, which saves the vote row in the database and adds a vote change to a queue. A score worker takes changes from the queue, reads new posts and saves counts in the database, and sets scores and post cards in the cache. GET feed goes to the Feed service, which reads top post ids and cards from the cache. The database copies writes to a replica. Signs show the tables, the queue and the cache keys.</desc>
+<g class="d-node grass" style="--i:0"><rect x="10" y="390" width="80" height="60"/><text class="d-text" x="50" y="425" text-anchor="middle">Client</text></g>
+<path class="d-edge" style="--i:1" d="M90 420H110"/><path class="d-arrow" style="--i:1" d="M104 414L112 420L104 426Z"/><path class="d-arrow" style="--i:1" d="M96 414L88 420L96 426Z"/>
+<g class="d-node" style="--i:1"><rect x="110" y="30" width="100" height="770"/><text class="d-text" x="160" y="410" text-anchor="middle">API</text><text class="d-text" x="160" y="428" text-anchor="middle">gateway</text><text class="d-item" x="118" y="456">- one door</text><text class="d-item" x="118" y="476">- by path</text></g>
+<path class="d-edge accent" style="--i:2" d="M210 190H310"/><path class="d-arrow accent" style="--i:2" d="M304 184L312 190L304 196Z"/><path class="d-arrow accent" style="--i:2" d="M216 184L208 190L216 196Z"/><text class="d-label" style="--i:2" x="260" y="174" text-anchor="middle">POST /posts</text>
+<g class="d-node cmd" style="--i:2"><rect x="310" y="130" width="180" height="100"/><text class="d-text" x="400" y="156" text-anchor="middle">Post svc</text><text class="d-item" x="320" y="182">- check title length</text><text class="d-item" x="320" y="202">- id from a sequence</text><text class="d-item" x="320" y="222">- save row, reply 201</text></g>
+<path class="d-edge accent" style="--i:3" d="M490 190H590"/><path class="d-arrow accent" style="--i:3" d="M584 184L592 190L584 196Z"/><text class="d-label" style="--i:3" x="540" y="178" text-anchor="middle">save post</text>
+<g class="d-node chest" style="--i:3"><rect x="590" y="170" width="160" height="120"/><text class="d-text" x="670" y="200" text-anchor="middle">Database</text><text class="d-sub" x="670" y="224" text-anchor="middle">primary</text></g>
+<path class="d-line" style="--i:3" d="M670 152V170"/>
+<g class="d-note" style="--i:3"><rect x="560" y="16" width="190" height="136"/><text class="d-note-t" x="572" y="36">two tables</text><text class="d-mono" x="572" y="58">posts  post_id PK</text><text class="d-mono" x="572" y="76">  community, title</text><text class="d-mono" x="572" y="94">  up, down, score</text><text class="d-mono" x="572" y="112">votes  PK post+user</text><text class="d-mono" x="572" y="130">  value +1 / -1</text></g>
+<path class="d-edge" style="--i:4" d="M730 290V330"/><path class="d-arrow" style="--i:4" d="M724 324L730 332L736 324Z"/><text class="d-label" style="--i:4" x="722" y="316" text-anchor="end">copies writes</text>
+<g class="d-node chest" style="--i:4"><rect x="640" y="330" width="110" height="50"/><text class="d-text" x="695" y="352" text-anchor="middle">Replica</text><text class="d-sub" x="695" y="372" text-anchor="middle">standby copy</text></g>
+<path class="d-edge accent" style="--i:5" d="M210 300H310"/><path class="d-arrow accent" style="--i:5" d="M304 294L312 300L304 306Z"/><path class="d-arrow accent" style="--i:5" d="M216 294L208 300L216 306Z"/><text class="d-label" style="--i:5" x="260" y="286" text-anchor="middle">PUT /posts</text><text class="d-label" style="--i:5" x="260" y="324" text-anchor="middle">/{id}/vote</text>
+<g class="d-node cmd" style="--i:5"><rect x="310" y="260" width="180" height="124"/><text class="d-text" x="400" y="286" text-anchor="middle">Vote svc</text><text class="d-item" x="320" y="312">- one vote per user</text><text class="d-item" x="320" y="332">- save or change row</text><text class="d-item" x="320" y="352">- work out the change</text><text class="d-item" x="320" y="372">- queue it, reply 200</text></g>
+<path class="d-edge accent" style="--i:6" d="M490 274H590"/><path class="d-arrow accent" style="--i:6" d="M584 268L592 274L584 280Z"/><path class="d-arrow accent" style="--i:6" d="M496 268L488 274L496 280Z"/><text class="d-label" style="--i:6" x="540" y="262" text-anchor="middle">save vote</text>
+<path class="d-edge accent" style="--i:7" d="M400 384V430"/><path class="d-arrow accent" style="--i:7" d="M394 424L400 432L406 424Z"/><text class="d-label" style="--i:7" x="408" y="412">vote change</text>
+<g class="d-node furnace" style="--i:7"><rect x="310" y="430" width="180" height="60"/><text class="d-text" x="400" y="456" text-anchor="middle">Queue</text><text class="d-sub" x="400" y="476" text-anchor="middle">vote changes</text></g>
+<path class="d-line" style="--i:7" d="M400 490V510"/>
+<g class="d-note" style="--i:7"><rect x="310" y="510" width="200" height="80"/><text class="d-note-t" x="322" y="530">vote queue</text><text class="d-mono" x="322" y="552">msg  post_id, user_id</text><text class="d-mono" x="322" y="570">     change +1 / -1</text></g>
+<path class="d-edge accent" style="--i:8" d="M490 460H590"/><path class="d-arrow accent" style="--i:8" d="M584 454L592 460L584 466Z"/><text class="d-label" style="--i:8" x="540" y="448" text-anchor="middle">take events</text>
+<g class="d-node furnace" style="--i:8"><rect x="590" y="410" width="160" height="124"/><text class="d-text" x="670" y="436" text-anchor="middle">Score worker</text><text class="d-item" x="600" y="462">- batch the changes</text><text class="d-item" x="600" y="482">- add new posts</text><text class="d-item" x="600" y="502">- recompute scores</text><text class="d-item" x="600" y="522">- save counts</text></g>
+<path class="d-edge accent" style="--i:9" d="M620 410V290"/><path class="d-arrow accent" style="--i:9" d="M614 298L620 290L626 298Z"/><path class="d-arrow accent" style="--i:9" d="M614 402L620 410L626 402Z"/><text class="d-label" style="--i:9" x="612" y="350" text-anchor="end">posts, counts</text>
+<path class="d-edge accent" style="--i:10" d="M670 534V590"/><path class="d-arrow accent" style="--i:10" d="M664 584L670 592L676 584Z"/><text class="d-label" style="--i:10" x="678" y="566">set scores</text>
+<g class="d-node gem" style="--i:10"><rect x="590" y="590" width="160" height="70"/><text class="d-text" x="670" y="618" text-anchor="middle">Cache</text><text class="d-sub" x="670" y="640" text-anchor="middle">sorted sets</text></g>
+<path class="d-line" style="--i:10" d="M670 660V680"/>
+<g class="d-note" style="--i:10"><rect x="560" y="680" width="190" height="120"/><text class="d-note-t" x="572" y="700">cache keys</text><text class="d-mono" x="572" y="722">hot:{community}</text><text class="d-mono" x="572" y="740">  post_id -> score</text><text class="d-mono" x="572" y="758">post:{id} -> card</text><text class="d-mono" x="572" y="776">top 1,000 each</text><text class="d-mono" x="572" y="794">no TTL, worker updates</text></g>
+<path class="d-edge alt" style="--i:11" d="M210 690H310"/><path class="d-arrow alt" style="--i:11" d="M304 684L312 690L304 696Z"/><path class="d-arrow alt" style="--i:11" d="M216 684L208 690L216 696Z"/><text class="d-label" style="--i:11" x="260" y="676" text-anchor="middle">GET /feed</text>
+<g class="d-node cmd" style="--i:11"><rect x="310" y="630" width="180" height="100"/><text class="d-text" x="400" y="656" text-anchor="middle">Feed svc</text><text class="d-item" x="320" y="682">- ids after the cursor</text><text class="d-item" x="320" y="702">- post cards, too</text><text class="d-item" x="320" y="722">- page + next cursor</text></g>
+<path class="d-edge alt" style="--i:12" d="M490 650H590"/><path class="d-arrow alt" style="--i:12" d="M584 644L592 650L584 656Z"/><path class="d-arrow alt" style="--i:12" d="M496 644L488 650L496 656Z"/><text class="d-label" style="--i:12" x="540" y="638" text-anchor="middle">top posts</text>
+<rect class="d-packet" x="-6" y="-6" width="12" height="12" opacity="0"><animateMotion dur="8s" begin="1.6s" repeatCount="indefinite" keyPoints="0;1;1" keyTimes="0;.5;1" calcMode="linear" path="M90 420H160V300H400V460H670V625"/><animate attributeName="opacity" dur="8s" begin="1.6s" repeatCount="indefinite" values="0;1;1;0;0" keyTimes="0;.02;.48;.5;1"/></rect>
+<rect class="d-packet alt" x="-6" y="-6" width="12" height="12" opacity="0"><animateMotion dur="8s" begin="1.6s" repeatCount="indefinite" keyPoints="0;0;1;1" keyTimes="0;.5;.9;1" calcMode="linear" path="M90 420H160V690H400V650H590"/><animate attributeName="opacity" dur="8s" begin="1.6s" repeatCount="indefinite" values="0;0;1;1;0;0" keyTimes="0;.5;.51;.89;.9;1"/></rect>
+              </svg>
+            </div>
+            <figcaption>The complete system. Gold = a vote travelling from the client to the cache, cyan = loading the feed. Posting, voting and reading are separate services because their traffic differs so much.</figcaption>
+            <button class="replay" type="button" aria-label="Replay diagram animation">Replay</button>
+          </figure>
+
+          <div class="next reveal">
+            <h4>What you could add next</h4>
+            <ul class="next-list">
+              <li>Split the database by community once one machine is too small.</li>
+              <li>A "new" and "top this week" feed, each with its own ranked list.</li>
+              <li>Spot vote spam before votes reach the queue.</li>
+            </ul>
+          </div>
+        </section>
+
+        <section class="sec reveal" id="2026-11-19-upvoted-feed-sec-tips">
+          <h3>Interview tips</h3>
+          <dl class="qa">
+            <div><dt>How do you stop one user voting twice?</dt><dd>The votes table has a primary key on (post, user), and the vote API is idempotent.</dd></div>
+            <div><dt>Why not offset pages like page=3?</dt><dd>Scores change while people scroll, so offsets skip or repeat posts. A cursor does not.</dd></div>
+            <div><dt>What if the worker falls behind?</dt><dd>Votes are already safe in the table; the scores just lag until it catches up.</dd></div>
+          </dl>
+          <h4>Common mistakes</h4>
+          <ul class="mistakes">
+            <li>Updating one counter row on every vote, so a viral post blocks itself.</li>
+            <li>Counting vote rows on every feed request.</li>
+          </ul>
+          <aside class="callout tip">
+            <span class="callout-label">Interview tip</span>
+            <p>Say out loud which data must be exact (one vote per person) and which may lag (the count).</p>
+          </aside>
+          <aside class="callout confidence">
+            <span class="callout-label">Confidence note</span>
+            <p>Traffic, limits and the score formula are assumptions or common choices, not any company's internals.</p>
+          </aside>
+        </section>
+
+        <p class="sources">Sources: Hello Interview's delivery framework; Alex Xu, <em>System Design Interview</em>, news feed chapter; Martin Kleppmann, <em>Designing Data-Intensive Applications</em>, replication and messaging chapters; <a href="https://redis.io/docs/latest/develop/data-types/sorted-sets/">Redis documentation on sorted sets</a>. This is a common approach, not a claim about any company's internals.</p>
+      </div>
+    </article>
     <article class="entry" id="2026-11-18-code-judge" data-topic="Online code judge" data-domain="Queues &amp; async jobs" data-date="2026-11-18" data-level="2">
       <header class="entry-head">
         <div class="entry-meta">
