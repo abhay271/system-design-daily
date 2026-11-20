@@ -420,6 +420,7 @@ dfn.term{font-style:normal;border-bottom:2px dotted var(--accent);cursor:help}
       <h2><svg viewBox="0 0 12 12" aria-hidden="true"><path fill="#7A4A2A" d="M0 2h12v9H0z"/><path fill="#A86A3C" d="M1 3h10v3H1zM1 7h10v3H1z"/><path fill="#E9B526" d="M5 5h2v3H5z"/><path fill="#4A2C18" d="M0 6h5v1H0zM7 6h5v1H7z"/></svg>Archive</h2>
       <ol class="toc">
         <!-- TOC -->
+        <li><a href="#2026-11-20-online-presence"><time datetime="2026-11-20">2026-11-20</time><span>Online presence: pings that expire, changes that push</span></a></li>
         <li><a href="#2026-11-19-upvoted-feed"><time datetime="2026-11-19">2026-11-19</time><span>Upvoted feed: count votes in batches, rank in a cache</span></a></li>
         <li><a href="#2026-11-18-code-judge"><time datetime="2026-11-18">2026-11-18</time><span>Online code judge: queue the code, run it in a sandbox</span></a></li>
         <li><a href="#2026-11-17-log-aggregation"><time datetime="2026-11-17">2026-11-17</time><span>Log aggregation: batch, queue, then store by day</span></a></li>
@@ -451,6 +452,254 @@ dfn.term{font-style:normal;border-bottom:2px dotted var(--accent);cursor:help}
 
   <main id="entries" tabindex="-1">
     <!-- ENTRIES -->
+    <article class="entry" id="2026-11-20-online-presence" data-topic="Online presence" data-domain="Real-time messaging" data-date="2026-11-20" data-level="2">
+      <header class="entry-head">
+        <div class="entry-meta">
+          <span class="chip">Real-time messaging</span>
+          <span class="level" title="Difficulty: level 2 of 3">Lv 2</span>
+          <time datetime="2026-11-20">20 Nov 2026</time>
+          <span class="read"><span class="read-time">4</span> min read</span>
+        </div>
+        <h2 class="entry-title">Design an online presence indicator</h2>
+        <p class="lede">A chat app shows a green dot next to friends who are online. It looks simple, but millions of phones must keep saying "I'm here", and a phone that crashes cannot say goodbye.</p>
+        <nav class="steps" aria-label="Sections of this design">
+          <a href="#2026-11-20-online-presence-sec-functional">Features</a>
+          <a href="#2026-11-20-online-presence-sec-nonfunctional">Qualities</a>
+          <a href="#2026-11-20-online-presence-sec-entities">Entities</a>
+          <a href="#2026-11-20-online-presence-sec-api">API</a>
+          <a href="#2026-11-20-online-presence-sec-hld">Design</a>
+          <a href="#2026-11-20-online-presence-sec-deepdives">Deep dives</a>
+          <a href="#2026-11-20-online-presence-sec-tips">Tips</a>
+        </nav>
+      </header>
+
+      <div class="prose">
+        <details class="legend">
+          <summary>Legend <span class="hint">8 terms used below</span></summary>
+          <dl>
+            <div><dt>Heartbeat</dt><dd>A tiny "I'm still here" message the app sends on a timer. If the messages stop, the app is gone.</dd></div>
+            <div><dt>Cursor</dt><dd>A bookmark that says where the last page ended, so the next request continues from there.</dd></div>
+            <div><dt>WebSocket</dt><dd>A connection that stays open, so the server can send you news without being asked.</dd></div>
+            <div><dt>Cache</dt><dd>A fast store, kept in memory, for data we read or write very often.</dd></div>
+            <div><dt>TTL</dt><dd>"Time to live": a countdown on a cache entry. When it reaches zero, the entry deletes itself.</dd></div>
+            <div><dt>Pub/sub</dt><dd>A message board with channels. Anyone can post to a channel, and everyone listening to it gets the message.</dd></div>
+            <div><dt>API gateway</dt><dd>The single front door that sends each request to the right service.</dd></div>
+            <div><dt>Replica</dt><dd>A live copy of a database. It takes over if the main one fails.</dd></div>
+          </dl>
+        </details>
+
+        <section class="sec reveal" id="2026-11-20-online-presence-sec-functional">
+          <h3>Functional requirements</h3>
+          <ul class="reqs">
+            <li>While the app is open, keep telling the server "I'm online".</li>
+            <li>See which of your friends are online right now.</li>
+            <li>See friends come online and go offline, live.</li>
+          </ul>
+          <p class="out">Out of scope: "last seen 5 minutes ago", privacy settings, typing indicators, adding friends.</p>
+        </section>
+
+        <section class="sec reveal" id="2026-11-20-online-presence-sec-nonfunctional">
+          <h3>Non-functional requirements</h3>
+          <ul class="reqs nfr">
+            <li><strong>Notice a vanished user.</strong> A crashed phone sends no goodbye, yet it must turn offline within about a minute.</li>
+            <li><strong>Handle constant writes.</strong> Every online user pings all the time, so writes far outnumber reads.</li>
+            <li><strong>Live updates.</strong> A friend's dot should change within a few seconds, without refreshing.</li>
+            <li><strong>Slightly stale is fine.</strong> A dot that is a few seconds wrong hurts nobody.</li>
+          </ul>
+        </section>
+
+        <section class="sec reveal" id="2026-11-20-online-presence-sec-entities">
+          <h3>Core entities</h3>
+          <ul class="entities">
+            <li><strong>User:</strong> an id (from the user service, out of scope).</li>
+            <li><strong>Friendship:</strong> a pair of user ids.</li>
+            <li><strong>Presence:</strong> whether a user is online, and when we last heard from them.</li>
+          </ul>
+        </section>
+
+        <section class="sec reveal" id="2026-11-20-online-presence-sec-api">
+          <h3>API design</h3>
+          <div class="api-list">
+            <div class="api">
+              <div class="api-sig"><span class="method put">PUT</span><code>/me/presence</code></div>
+              <p>The <dfn class="term" title="A tiny &quot;I'm still here&quot; message the app sends on a timer. If the messages stop, the app is gone.">heartbeat</dfn>. The app sends it every 15 seconds (assumed). Safe to repeat. The user comes from the auth token; 401 without one.</p>
+              <div class="io">
+                <div><span class="io-l">Request body</span><pre>(none)</pre></div>
+                <div><span class="io-l">Response 204 No Content</span><pre>(empty)</pre></div>
+              </div>
+            </div>
+            <div class="api">
+              <div class="api-sig"><span class="method get">GET</span><code>/friends/presence?cursor=…</code></div>
+              <p>One page of your friends who are online. The <dfn class="term" title="A bookmark that says where the last page ended, so the next request continues from there.">cursor</dfn> marks where the page ended.</p>
+              <div class="io">
+                <div><span class="io-l">Request body</span><pre>(none)</pre></div>
+                <div><span class="io-l">Response 200 OK</span><pre>{ "online": [ { "user_id": "u_42" } ],
+  "next_cursor": "u_42" }</pre></div>
+              </div>
+            </div>
+            <div class="api">
+              <div class="api-sig"><span class="method get">GET</span><code>/friends/stream</code></div>
+              <p>Upgrades to a <dfn class="term" title="A connection that stays open, so the server can send you news without being asked.">WebSocket</dfn>. The server then pushes each change.</p>
+              <div class="io">
+                <div><span class="io-l">Request body</span><pre>(none)</pre></div>
+                <div><span class="io-l">Response 101 Switching Protocols, then messages</span><pre>{ "user_id": "u_42",
+  "status": "online" }</pre></div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="sec" id="2026-11-20-online-presence-sec-hld">
+          <h3>High-level design</h3>
+          <div class="reveal">
+            <p>Assume 1 million people online at once, each pinging every 15 seconds. That is 1,000,000 / 15, about 67,000 writes a second. Keep that number in mind. Servers are identical, keep no data, and sit behind a load balancer.</p>
+            <h4>1. Send a heartbeat</h4>
+            <p>The server saves the current time as the user's <code>last_seen</code>.</p>
+            <h4>2. See who is online</h4>
+            <p>The server reads the user's friend ids, then each friend's <code>last_seen</code>. Seen in the last 45 seconds means online. We cap friends at 500 (assumed) so this stays small.</p>
+            <h4>3. See live changes</h4>
+            <p>The simplest version: the app repeats the friends request every few seconds. It works, but it wastes requests, and the deep dives fix the cost of both write and read sides.</p>
+            <div class="table-scroll">
+              <table class="schema">
+                <caption>Tables: presence and friendships</caption>
+                <thead><tr><th>Column</th><th>Type</th><th>Note</th></tr></thead>
+                <tbody>
+                  <tr><td>presence.user_id</td><td>bigint</td><td>primary key</td></tr>
+                  <tr><td>presence.last_seen</td><td>time</td><td>updated on every heartbeat</td></tr>
+                  <tr><td>friendships (user_id, friend_id)</td><td>bigint</td><td>primary key on the pair; serves "my friends"</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <figure class="diagram-fig">
+            <div class="diagram-scroll" tabindex="0" role="group" aria-label="Diagram: simple online presence. Scrollable on small screens.">
+              <svg class="diagram" viewBox="0 0 760 340" role="img" aria-labelledby="2026-11-20-online-presence-d1-t 2026-11-20-online-presence-d1-d">
+                <title id="2026-11-20-online-presence-d1-t">Simple online presence</title>
+                <desc id="2026-11-20-online-presence-d1-d">The client sends heartbeats and friend lookups to the app servers. The app servers save last seen times in the database and read friends and their times. A sign shows the presence and friendships tables.</desc>
+<g class="d-node grass" style="--i:0"><rect x="8" y="90" width="82" height="60"/><text class="d-text" x="49" y="125" text-anchor="middle">Client</text></g>
+<path class="d-edge" style="--i:1" d="M90 120H180"/><path class="d-arrow" style="--i:1" d="M174 114L182 120L174 126Z"/><path class="d-arrow" style="--i:1" d="M96 114L88 120L96 126Z"/><text class="d-label" style="--i:1" x="135" y="110" text-anchor="middle">heartbeat</text><text class="d-label" style="--i:1" x="135" y="140" text-anchor="middle">who's on?</text>
+<g class="d-node cmd" style="--i:2"><rect x="180" y="60" width="190" height="94"/><text class="d-text" x="275" y="86" text-anchor="middle">App servers</text><text class="d-item" x="192" y="112">- save the time</text><text class="d-item" x="192" y="132">- read friends' times</text><text class="d-item" x="192" y="152">- recent = online</text></g>
+<path class="d-edge accent" style="--i:3" d="M370 90H570"/><path class="d-arrow accent" style="--i:3" d="M564 84L572 90L564 96Z"/><text class="d-label" style="--i:3" x="470" y="80" text-anchor="middle">save last_seen</text>
+<path class="d-edge alt" style="--i:4" d="M370 128H570"/><path class="d-arrow alt" style="--i:4" d="M564 122L572 128L564 134Z"/><path class="d-arrow alt" style="--i:4" d="M376 122L368 128L376 134Z"/><text class="d-label" style="--i:4" x="470" y="118" text-anchor="middle">read friends</text>
+<g class="d-node chest" style="--i:3"><rect x="570" y="60" width="170" height="94"/><text class="d-text" x="655" y="92" text-anchor="middle">Database</text><text class="d-sub" x="655" y="114" text-anchor="middle">two tables</text></g>
+<path class="d-line" style="--i:3" d="M655 154V200"/>
+<g class="d-note" style="--i:3"><rect x="560" y="200" width="190" height="102"/><text class="d-note-t" x="572" y="220">two tables</text><text class="d-mono" x="572" y="242">presence: user_id PK</text><text class="d-mono" x="572" y="260">  last_seen time</text><text class="d-mono" x="572" y="278">friendships: PK</text><text class="d-mono" x="572" y="296">  user_id, friend_id</text></g>
+<rect class="d-packet" x="-6" y="-6" width="12" height="12" opacity="0"><animateMotion dur="8s" begin="1.4s" repeatCount="indefinite" keyPoints="0;1;1" keyTimes="0;.4;1" calcMode="linear" path="M90 120H275V90H570"/><animate attributeName="opacity" dur="8s" begin="1.4s" repeatCount="indefinite" values="0;1;1;0;0" keyTimes="0;.02;.38;.4;1"/></rect>
+<rect class="d-packet alt" x="-6" y="-6" width="12" height="12" opacity="0"><animateMotion dur="8s" begin="1.4s" repeatCount="indefinite" keyPoints="0;0;1;1" keyTimes="0;.4;.8;1" calcMode="linear" path="M90 120H275V128H570"/><animate attributeName="opacity" dur="8s" begin="1.4s" repeatCount="indefinite" values="0;0;1;1;0;0" keyTimes="0;.4;.41;.79;.8;1"/></rect>
+              </svg>
+            </div>
+            <figcaption>The starting point. Gold = a heartbeat being saved, cyan = checking friends. The deep dives fix what breaks.</figcaption>
+            <button class="replay" type="button" aria-label="Replay diagram animation">Replay</button>
+          </figure>
+
+          <aside class="callout why reveal">
+            <span class="callout-label">Why</span>
+            <p><strong>Why a heartbeat instead of "I closed the app"?</strong> A crash, a dead battery or a tunnel sends no goodbye. Silence is the one signal that always works.</p>
+          </aside>
+        </section>
+
+        <section class="sec" id="2026-11-20-online-presence-sec-deepdives">
+          <h3>Deep dives</h3>
+          <div class="dive reveal">
+            <h4>How do we notice someone is gone, at 67,000 pings a second?</h4>
+            <p>Offline must show within a minute, and the database cannot take that many writes.</p>
+            <ol class="options">
+              <li><strong>Only trust a "goodbye" message.</strong> Cheap, but a crash leaves a user "online" forever.</li>
+              <li><strong>Save last_seen in the database.</strong> Simple, but 67,000 disk writes a second for throwaway data.</li>
+              <li class="pick"><strong>A key with a countdown.</strong><span class="pick-tag">Pick</span> Each ping resets a <dfn class="term" title="A fast store, kept in memory, for data we read or write very often.">cache</dfn> key that has a <dfn class="term" title="&quot;Time to live&quot;: a countdown on a cache entry. When it reaches zero, the entry deletes itself.">TTL</dfn>.</li>
+            </ol>
+            <p>The key is <code>presence:{user}</code> with a 45-second TTL, which is three missed pings. A missed ping or two is forgiven, so a brief signal drop does not flicker. When the key expires, the user is offline. Presence data is throwaway, so the database never sees it.</p>
+          </div>
+
+          <div class="dive reveal">
+            <h4>How do friends see changes live?</h4>
+            <p>Polling makes every viewer send a request every few seconds, even when nothing changed.</p>
+            <ol class="options">
+              <li><strong>Poll the friends list.</strong> Simple, but most replies say "no change".</li>
+              <li><strong>Tell every friend on every ping.</strong> Needs a message per friend per ping, which explodes.</li>
+              <li class="pick"><strong>Publish only when the status flips.</strong><span class="pick-tag">Pick</span> Friends listen on <dfn class="term" title="A message board with channels. Anyone can post to a channel, and everyone listening to it gets the message.">pub/sub</dfn> channels.</li>
+            </ol>
+            <p>Each user has a channel. A ping that creates a missing key means "just came online", so the presence service publishes once. The ping that merely resets a key publishes nothing. When a key expires, the cache tells the presence service, which publishes "offline". The friends service holds each viewer's WebSocket, subscribes to the channels of their friends, and forwards what arrives. If pub/sub is down, dots go stale until the app refetches the list.</p>
+          </div>
+
+          <div class="reveal">
+            <h4>Final design</h4>
+            <p>The dives added a cache and pub/sub. The write side (presence service) and the read side (friends service) are split because pings vastly outnumber friend lookups. An <dfn class="term" title="The single front door that sends each request to the right service.">API gateway</dfn> routes by path. Friendships sit in a database with a <dfn class="term" title="A live copy of a database. It takes over if the main one fails.">replica</dfn> that serves reads and takes over on failure. If the cache is lost, everyone looks offline until their next ping, at most 15 seconds.</p>
+          </div>
+
+          <figure class="diagram-fig" id="2026-11-20-online-presence-final">
+            <div class="diagram-scroll" tabindex="0" role="group" aria-label="Diagram: the final online presence design. Scrollable on small screens.">
+              <svg class="diagram" viewBox="0 0 760 830" role="img" aria-labelledby="2026-11-20-online-presence-d2-t 2026-11-20-online-presence-d2-d">
+                <title id="2026-11-20-online-presence-d2-t">Final online presence design</title>
+                <desc id="2026-11-20-online-presence-d2-d">The client talks to an API gateway. PUT me presence goes to the Presence service, which sets a presence key with a 45 second TTL in the cache, hears key expiry from the cache, and publishes online and offline events to pub/sub. GET friends presence and GET friends stream go to the Friends service, which checks keys in the cache, reads friend ids from the replica, and subscribes to pub/sub events. The database copies writes to the replica. Signs show the cache key, the pub/sub message and the friendships table.</desc>
+<g class="d-node grass" style="--i:0"><rect x="10" y="400" width="80" height="60"/><text class="d-text" x="50" y="435" text-anchor="middle">Client</text></g>
+<path class="d-edge" style="--i:1" d="M90 430H110"/><path class="d-arrow" style="--i:1" d="M104 424L112 430L104 436Z"/><path class="d-arrow" style="--i:1" d="M96 424L88 430L96 436Z"/>
+<g class="d-node" style="--i:1"><rect x="110" y="20" width="90" height="790"/><text class="d-text" x="155" y="410" text-anchor="middle">API</text><text class="d-text" x="155" y="428" text-anchor="middle">gateway</text><text class="d-item" x="118" y="456">- one door</text><text class="d-item" x="118" y="476">- by path</text></g>
+<path class="d-edge accent" style="--i:2" d="M200 100H310"/><path class="d-arrow accent" style="--i:2" d="M304 94L312 100L304 106Z"/><path class="d-arrow accent" style="--i:2" d="M206 94L198 100L206 106Z"/><text class="d-label" style="--i:2" x="255" y="84" text-anchor="middle">PUT /me</text><text class="d-label" style="--i:2" x="255" y="126" text-anchor="middle">/presence</text>
+<g class="d-node cmd" style="--i:2"><rect x="310" y="40" width="180" height="120"/><text class="d-text" x="400" y="66" text-anchor="middle">Presence svc</text><text class="d-item" x="320" y="92">- set key, 45s TTL</text><text class="d-item" x="320" y="112">- publish on a flip</text><text class="d-item" x="320" y="132">- hear key expiry</text><text class="d-item" x="320" y="152">- reply 204</text></g>
+<path class="d-edge accent" style="--i:3" d="M400 160V240"/><path class="d-arrow accent" style="--i:3" d="M394 234L400 242L406 234Z"/><path class="d-arrow accent" style="--i:3" d="M394 166L400 158L406 166Z"/><text class="d-label" style="--i:3" x="392" y="204" text-anchor="end">set key</text><text class="d-label" style="--i:3" x="408" y="204">key expired</text>
+<g class="d-node gem" style="--i:3"><rect x="310" y="240" width="180" height="70"/><text class="d-text" x="400" y="268" text-anchor="middle">Cache</text><text class="d-sub" x="400" y="290" text-anchor="middle">presence keys</text></g>
+<path class="d-line" style="--i:3" d="M490 275H500"/>
+<g class="d-note" style="--i:3"><rect x="500" y="225" width="140" height="100"/><text class="d-note-t" x="510" y="245">cache key</text><text class="d-mono" x="510" y="267">presence:{user}</text><text class="d-mono" x="510" y="285">  -> online</text><text class="d-mono" x="510" y="303">TTL 45 seconds</text></g>
+<path class="d-edge accent" style="--i:4" d="M490 140H660"/><path class="d-arrow accent" style="--i:4" d="M654 134L662 140L654 146Z"/><text class="d-label" style="--i:4" x="575" y="128" text-anchor="middle">online/offline</text>
+<g class="d-node furnace" style="--i:4"><rect x="660" y="100" width="90" height="420"/><text class="d-text" x="705" y="300" text-anchor="middle">Pub/sub</text><text class="d-sub" x="705" y="322" text-anchor="middle">events</text></g>
+<path class="d-line" style="--i:4" d="M705 520V540"/>
+<g class="d-note" style="--i:4"><rect x="560" y="540" width="190" height="100"/><text class="d-note-t" x="572" y="560">pub/sub channels</text><text class="d-mono" x="572" y="582">channel  user:{id}</text><text class="d-mono" x="572" y="600">message  user_id,</text><text class="d-mono" x="572" y="618">  online | offline</text></g>
+<path class="d-edge alt" style="--i:5" d="M200 420H310"/><path class="d-arrow alt" style="--i:5" d="M304 414L312 420L304 426Z"/><path class="d-arrow alt" style="--i:5" d="M206 414L198 420L206 426Z"/><text class="d-label" style="--i:5" x="255" y="404" text-anchor="middle">GET /friends</text><text class="d-label" style="--i:5" x="255" y="446" text-anchor="middle">/presence</text>
+<path class="d-edge alt" style="--i:5" d="M200 480H310"/><path class="d-arrow alt" style="--i:5" d="M304 474L312 480L304 486Z"/><path class="d-arrow alt" style="--i:5" d="M206 474L198 480L206 486Z"/><text class="d-label" style="--i:5" x="255" y="464" text-anchor="middle">GET /friends</text><text class="d-label" style="--i:5" x="255" y="506" text-anchor="middle">/stream</text>
+<g class="d-node cmd" style="--i:5"><rect x="310" y="390" width="180" height="120"/><text class="d-text" x="400" y="416" text-anchor="middle">Friends svc</text><text class="d-item" x="320" y="442">- friend ids from replica</text><text class="d-item" x="320" y="462">- check keys in cache</text><text class="d-item" x="320" y="482">- hold the WebSocket</text><text class="d-item" x="320" y="502">- push each change</text></g>
+<path class="d-edge alt" style="--i:6" d="M400 390V310"/><path class="d-arrow alt" style="--i:6" d="M394 316L400 308L406 316Z"/><path class="d-arrow alt" style="--i:6" d="M394 384L400 392L406 384Z"/><text class="d-label" style="--i:6" x="408" y="355">who's online</text>
+<path class="d-edge alt" style="--i:7" d="M490 470H660"/><path class="d-arrow alt" style="--i:7" d="M654 464L662 470L654 476Z"/><path class="d-arrow alt" style="--i:7" d="M496 464L488 470L496 476Z"/><text class="d-label" style="--i:7" x="575" y="458" text-anchor="middle">subscribe, events</text>
+<path class="d-edge alt" style="--i:8" d="M400 510V590"/><path class="d-arrow alt" style="--i:8" d="M394 584L400 592L406 584Z"/><path class="d-arrow alt" style="--i:8" d="M394 516L400 508L406 516Z"/><text class="d-label" style="--i:8" x="408" y="555">friend ids</text>
+<g class="d-node chest" style="--i:8"><rect x="310" y="590" width="180" height="60"/><text class="d-text" x="400" y="616" text-anchor="middle">Replica</text><text class="d-sub" x="400" y="636" text-anchor="middle">friend ids</text></g>
+<path class="d-edge" style="--i:9" d="M400 720V650"/><path class="d-arrow" style="--i:9" d="M394 656L400 648L406 656Z"/><text class="d-label" style="--i:9" x="408" y="692">copies writes</text>
+<g class="d-node chest" style="--i:9"><rect x="310" y="720" width="180" height="60"/><text class="d-text" x="400" y="746" text-anchor="middle">Database</text><text class="d-sub" x="400" y="766" text-anchor="middle">primary</text></g>
+<path class="d-line" style="--i:9" d="M490 750H560"/>
+<g class="d-note" style="--i:9"><rect x="560" y="710" width="190" height="80"/><text class="d-note-t" x="572" y="730">friendships table</text><text class="d-mono" x="572" y="752">user_id    PK</text><text class="d-mono" x="572" y="770">friend_id  PK</text></g>
+<rect class="d-packet" x="-6" y="-6" width="12" height="12" opacity="0"><animateMotion dur="8s" begin="1.6s" repeatCount="indefinite" keyPoints="0;1;1" keyTimes="0;.5;1" calcMode="linear" path="M90 430H155V100H400V240"/><animate attributeName="opacity" dur="8s" begin="1.6s" repeatCount="indefinite" values="0;1;1;0;0" keyTimes="0;.02;.48;.5;1"/></rect>
+<rect class="d-packet alt" x="-6" y="-6" width="12" height="12" opacity="0"><animateMotion dur="8s" begin="1.6s" repeatCount="indefinite" keyPoints="0;0;1;1" keyTimes="0;.5;.9;1" calcMode="linear" path="M90 430H155V420H400V310"/><animate attributeName="opacity" dur="8s" begin="1.6s" repeatCount="indefinite" values="0;0;1;1;0;0" keyTimes="0;.5;.51;.89;.9;1"/></rect>
+              </svg>
+            </div>
+            <figcaption>The complete system. Gold = a heartbeat reaching the cache, cyan = a friends request reading it. Heartbeats and friend lookups are separate services because their traffic differs so much.</figcaption>
+            <button class="replay" type="button" aria-label="Replay diagram animation">Replay</button>
+          </figure>
+
+          <div class="next reveal">
+            <h4>What you could add next</h4>
+            <ul class="next-list">
+              <li>Split the cache by user id once one machine is too small.</li>
+              <li>A "last seen" time kept in the database for offline friends.</li>
+              <li>Skip pushes for users with huge friend lists and fetch on demand.</li>
+            </ul>
+          </div>
+        </section>
+
+        <section class="sec reveal" id="2026-11-20-online-presence-sec-tips">
+          <h3>Interview tips</h3>
+          <dl class="qa">
+            <div><dt>Why a 45-second TTL for a 15-second ping?</dt><dd>It tolerates two missed pings, so a brief signal drop does not flicker the dot.</dd></div>
+            <div><dt>Could the heartbeat go over the WebSocket?</dt><dd>Yes, many designs do. A plain request keeps the write path simple and stateless.</dd></div>
+            <div><dt>What about someone with a million followers?</dt><dd>Do not push to everyone. Show their status only when a profile is opened.</dd></div>
+          </dl>
+          <h4>Common mistakes</h4>
+          <ul class="mistakes">
+            <li>Writing every heartbeat to the main database.</li>
+            <li>Publishing an event on every ping, not only when the status flips.</li>
+          </ul>
+          <aside class="callout tip">
+            <span class="callout-label">Interview tip</span>
+            <p>Say the ping interval and the TTL out loud, and why the TTL is longer.</p>
+          </aside>
+          <aside class="callout confidence">
+            <span class="callout-label">Confidence note</span>
+            <p>The 15-second ping, 45-second TTL and 500-friend cap are assumptions. Cache expiry notices can be missed, so some designs add a periodic sweep as a backup.</p>
+          </aside>
+        </section>
+
+        <p class="sources">Sources: Alex Xu, <em>System Design Interview</em>, chat system chapter (online presence); <a href="https://redis.io/docs/latest/commands/expire/">Redis documentation on key expiry</a>; <a href="https://redis.io/docs/latest/develop/pubsub/">Redis documentation on pub/sub</a>. This is a common approach, not a claim about any company's internals.</p>
+      </div>
+    </article>
     <article class="entry" id="2026-11-19-upvoted-feed" data-topic="Upvoted feed" data-domain="Feeds" data-date="2026-11-19" data-level="2">
       <header class="entry-head">
         <div class="entry-meta">
