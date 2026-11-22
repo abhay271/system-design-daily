@@ -420,6 +420,7 @@ dfn.term{font-style:normal;border-bottom:2px dotted var(--accent);cursor:help}
       <h2><svg viewBox="0 0 12 12" aria-hidden="true"><path fill="#7A4A2A" d="M0 2h12v9H0z"/><path fill="#A86A3C" d="M1 3h10v3H1zM1 7h10v3H1z"/><path fill="#E9B526" d="M5 5h2v3H5z"/><path fill="#4A2C18" d="M0 6h5v1H0zM7 6h5v1H7z"/></svg>Archive</h2>
       <ol class="toc">
         <!-- TOC -->
+        <li><a href="#2026-11-22-feature-flags"><time datetime="2026-11-22">2026-11-22</time><span>Feature flags</span></a></li>
         <li><a href="#2026-11-21-online-poll"><time datetime="2026-11-21">2026-11-21</time><span>Online poll: one vote each, totals kept in a cache</span></a></li>
         <li><a href="#2026-11-20-online-presence"><time datetime="2026-11-20">2026-11-20</time><span>Online presence: pings that expire, changes that push</span></a></li>
         <li><a href="#2026-11-19-upvoted-feed"><time datetime="2026-11-19">2026-11-19</time><span>Upvoted feed: count votes in batches, rank in a cache</span></a></li>
@@ -453,6 +454,240 @@ dfn.term{font-style:normal;border-bottom:2px dotted var(--accent);cursor:help}
 
   <main id="entries" tabindex="-1">
     <!-- ENTRIES -->
+
+    <article class="entry" id="2026-11-22-feature-flags" data-topic="Feature flags" data-domain="Read-heavy lookup" data-date="2026-11-22" data-level="2">
+      <header class="entry-head">
+        <div class="entry-meta">
+          <span class="chip">Read-heavy lookup</span>
+          <span class="level" title="Difficulty: level 2 of 3">Lv 2</span>
+          <time datetime="2026-11-22">22 Nov 2026</time>
+          <span class="read"><span class="read-time">4</span> min read</span>
+        </div>
+        <h2 class="entry-title">Design a feature flag service</h2>
+        <p class="lede">A team ships a new checkout page, but turns it on for only 10% of users first. If it goes wrong, they switch it off in seconds, with no new release. Every page load asks "is this on for me?", so reads vastly outnumber changes.</p>
+        <nav class="steps" aria-label="Sections of this design">
+          <a href="#2026-11-22-feature-flags-sec-functional">Features</a>
+          <a href="#2026-11-22-feature-flags-sec-nonfunctional">Qualities</a>
+          <a href="#2026-11-22-feature-flags-sec-entities">Entities</a>
+          <a href="#2026-11-22-feature-flags-sec-api">API</a>
+          <a href="#2026-11-22-feature-flags-sec-hld">Design</a>
+          <a href="#2026-11-22-feature-flags-sec-deepdives">Deep dives</a>
+          <a href="#2026-11-22-feature-flags-sec-tips">Tips</a>
+        </nav>
+      </header>
+
+      <div class="prose">
+        <details class="legend">
+          <summary>Legend <span class="hint">6 terms used below</span></summary>
+          <dl>
+            <div><dt>Feature flag</dt><dd>A named on/off switch stored outside the code. The app asks it whether a feature is on, so the feature can change without a new release.</dd></div>
+            <div><dt>Hash</dt><dd>A function that turns any text into a number. The same text always gives the same number, and different texts give numbers that look random.</dd></div>
+            <div><dt>Cache</dt><dd>A fast store, kept in memory, for data we read very often.</dd></div>
+            <div><dt>TTL</dt><dd>"Time to live": a countdown on a cache entry. When it reaches zero, the entry deletes itself.</dd></div>
+            <div><dt>API gateway</dt><dd>The single front door that sends each request to the right service.</dd></div>
+            <div><dt>Replica</dt><dd>A live copy of a database. It takes over if the main one fails.</dd></div>
+          </dl>
+        </details>
+
+        <section class="sec reveal" id="2026-11-22-feature-flags-sec-functional">
+          <h3>Functional requirements</h3>
+          <ul class="reqs">
+            <li>Create or change a <dfn class="term" title="A named on/off switch stored outside the code. The app asks it whether a feature is on, so the feature can change without a new release.">feature flag</dfn>: on or off, plus a rollout percent (0 to 100).</li>
+            <li>Check whether a flag is on for the current user.</li>
+          </ul>
+          <p class="out">Out of scope: targeting by country or plan, a dashboard, A/B test statistics, login.</p>
+        </section>
+
+        <section class="sec reveal" id="2026-11-22-feature-flags-sec-nonfunctional">
+          <h3>Non-functional requirements</h3>
+          <ul class="reqs nfr">
+            <li><strong>Fast checks.</strong> Every page load asks about several flags, so a slow check slows the whole product.</li>
+            <li><strong>Never break the app.</strong> If the flag service is down, the product must keep working.</li>
+            <li><strong>Same answer for the same user.</strong> A user must not see the new page, then the old one, on the next refresh.</li>
+            <li><strong>Changes show up within seconds.</strong> "Switch it off now" is the whole point.</li>
+          </ul>
+        </section>
+
+        <section class="sec reveal" id="2026-11-22-feature-flags-sec-entities">
+          <h3>Core entities</h3>
+          <ul class="entities">
+            <li><strong>Flag:</strong> a unique name, an on/off switch and a rollout percent.</li>
+          </ul>
+        </section>
+
+        <section class="sec reveal" id="2026-11-22-feature-flags-sec-api">
+          <h3>API design</h3>
+          <div class="api-list">
+            <div class="api">
+              <div class="api-sig"><span class="method put">PUT</span><code>/flags/{name}</code></div>
+              <p>Creates the flag, or replaces its settings. 201 Created the first time, 200 OK after that, 400 if the percent is outside 0 to 100.</p>
+              <div class="io">
+                <div><span class="io-l">Request body</span><pre>{ "enabled": true,
+  "rollout_percent": 10 }</pre></div>
+                <div><span class="io-l">Response 200 OK</span><pre>{ "name": "new-checkout",
+  "enabled": true,
+  "rollout_percent": 10 }</pre></div>
+              </div>
+            </div>
+            <div class="api">
+              <div class="api-sig"><span class="method get">GET</span><code>/flags/{name}/check</code></div>
+              <p>Says whether the flag is on for the caller. The user comes from the auth token. 404 if the flag does not exist.</p>
+              <div class="io">
+                <div><span class="io-l">Request body</span><pre>(none)</pre></div>
+                <div><span class="io-l">Response 200 OK</span><pre>{ "name": "new-checkout",
+  "on": true }</pre></div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="sec" id="2026-11-22-feature-flags-sec-hld">
+          <h3>High-level design</h3>
+          <div class="reveal">
+            <p>Assume 1 million active users, each page load checking about 10 flags. At peak that is roughly 10,000 checks a second (an assumption), while flags change a few times a day. Servers are identical, keep no data, and sit behind a load balancer.</p>
+            <h4>1. Create or change a flag</h4>
+            <p>The server saves one row. The unique name is the key, so no generated id is needed.</p>
+            <h4>2. Check a flag</h4>
+            <p>The server reads the row. If the flag is off, the answer is no. If it is on, the server takes a <dfn class="term" title="A function that turns any text into a number. The same text always gives the same number, and different texts give numbers that look random.">hash</dfn> of flag name plus user id, reduces it to 0-99, and answers yes when that number is below the rollout percent.</p>
+            <div class="table-scroll">
+              <table class="schema">
+                <caption>Table: flags</caption>
+                <thead><tr><th>Column</th><th>Type</th><th>Note</th></tr></thead>
+                <tbody>
+                  <tr><td>name</td><td>text</td><td>primary key: the query is "get one flag by name"</td></tr>
+                  <tr><td>enabled</td><td>boolean</td><td>master switch</td></tr>
+                  <tr><td>rollout_percent</td><td>int</td><td>0 to 100</td></tr>
+                  <tr><td>updated_at</td><td>time</td><td>when it last changed</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <figure class="diagram-fig">
+            <div class="diagram-scroll" tabindex="0" role="group" aria-label="Diagram: simple feature flag service. Scrollable on small screens.">
+              <svg class="diagram" viewBox="0 0 760 340" role="img" aria-labelledby="2026-11-22-feature-flags-d1-t 2026-11-22-feature-flags-d1-d">
+                <title id="2026-11-22-feature-flags-d1-t">Simple feature flag service</title>
+                <desc id="2026-11-22-feature-flags-d1-d">The client sends flag changes and flag checks to the app servers. The app servers save a flag row in the database and read it back to decide on or off using a hash of the user. A sign shows the flags table.</desc>
+<g class="d-node grass" style="--i:0"><rect x="8" y="90" width="82" height="60"/><text class="d-text" x="49" y="125" text-anchor="middle">Client</text></g>
+<path class="d-edge" style="--i:1" d="M90 120H180"/><path class="d-arrow" style="--i:1" d="M174 114L182 120L174 126Z"/><path class="d-arrow" style="--i:1" d="M96 114L88 120L96 126Z"/><text class="d-label" style="--i:1" x="135" y="110" text-anchor="middle">change</text><text class="d-label" style="--i:1" x="135" y="140" text-anchor="middle">on or off?</text>
+<g class="d-node cmd" style="--i:2"><rect x="180" y="60" width="190" height="94"/><text class="d-text" x="275" y="86" text-anchor="middle">App servers</text><text class="d-item" x="192" y="112">- save the flag row</text><text class="d-item" x="192" y="132">- hash user, compare %</text><text class="d-item" x="192" y="152">- answer on or off</text></g>
+<path class="d-edge accent" style="--i:3" d="M370 90H570"/><path class="d-arrow accent" style="--i:3" d="M564 84L572 90L564 96Z"/><text class="d-label" style="--i:3" x="470" y="80" text-anchor="middle">save flag</text>
+<path class="d-edge alt" style="--i:4" d="M370 128H570"/><path class="d-arrow alt" style="--i:4" d="M564 122L572 128L564 134Z"/><path class="d-arrow alt" style="--i:4" d="M376 122L368 128L376 134Z"/><text class="d-label" style="--i:4" x="470" y="118" text-anchor="middle">read flag</text>
+<g class="d-node chest" style="--i:3"><rect x="570" y="60" width="170" height="94"/><text class="d-text" x="655" y="92" text-anchor="middle">Database</text><text class="d-sub" x="655" y="114" text-anchor="middle">one table</text></g>
+<path class="d-line" style="--i:3" d="M655 154V200"/>
+<g class="d-note" style="--i:3"><rect x="560" y="200" width="190" height="100"/><text class="d-note-t" x="572" y="220">flags table</text><text class="d-mono" x="572" y="242">name  PK</text><text class="d-mono" x="572" y="260">enabled, rollout_percent</text><text class="d-mono" x="572" y="278">updated_at</text></g>
+<rect class="d-packet" x="-6" y="-6" width="12" height="12" opacity="0"><animateMotion dur="8s" begin="1.4s" repeatCount="indefinite" keyPoints="0;1;1" keyTimes="0;.4;1" calcMode="linear" path="M90 120H275V90H570"/><animate attributeName="opacity" dur="8s" begin="1.4s" repeatCount="indefinite" values="0;1;1;0;0" keyTimes="0;.02;.38;.4;1"/></rect>
+<rect class="d-packet alt" x="-6" y="-6" width="12" height="12" opacity="0"><animateMotion dur="8s" begin="1.4s" repeatCount="indefinite" keyPoints="0;0;1;1" keyTimes="0;.4;.8;1" calcMode="linear" path="M90 120H275V128H570"/><animate attributeName="opacity" dur="8s" begin="1.4s" repeatCount="indefinite" values="0;0;1;1;0;0" keyTimes="0;.4;.41;.79;.8;1"/></rect>
+              </svg>
+            </div>
+            <figcaption>The starting point. Gold = a flag being saved, cyan = a check reading it. Every check hits the database, which is what breaks first.</figcaption>
+            <button class="replay" type="button" aria-label="Replay diagram animation">Replay</button>
+          </figure>
+
+          <aside class="callout why reveal">
+            <span class="callout-label">Why</span>
+            <p><strong>Why hash the user instead of rolling a random number?</strong> A random roll changes a user's answer on every refresh. A hash always gives the same answer, and raising 10% to 25% keeps the first 10% of users included.</p>
+          </aside>
+        </section>
+
+        <section class="sec" id="2026-11-22-feature-flags-sec-deepdives">
+          <h3>Deep dives</h3>
+          <div class="dive reveal">
+            <h4>How do we keep checks fast and changes quick?</h4>
+            <p>10,000 identical reads a second of a table that rarely changes is wasted database work.</p>
+            <ol class="options">
+              <li><strong>Read the database every time.</strong> Always fresh, but the database does the same read over and over.</li>
+              <li><strong>Remember flags in each server's memory.</strong> Fast, but servers refresh separately, so users could see different answers.</li>
+              <li class="pick"><strong>A shared cache.</strong><span class="pick-tag">Pick</span> One shared copy, fixed for everyone by one change.</li>
+            </ol>
+            <p>The <dfn class="term" title="A fast store, kept in memory, for data we read very often.">cache</dfn> maps <code>flag:{name}</code> to the enabled switch and percent. The check service looks there first and, on a miss, reads the replica and fills the cache. The admin service deletes the entry whenever a flag changes, so the next check loads the new value within a moment. Entries also have a 60-second <dfn class="term" title="&quot;Time to live&quot;: a countdown on a cache entry. When it reaches zero, the entry deletes itself.">TTL</dfn>, a safety net if a delete is missed.</p>
+          </div>
+
+          <div class="dive reveal">
+            <h4>How do we keep the app working if the flag service fails?</h4>
+            <p>A flag check must never be the reason a page does not load.</p>
+            <ol class="options">
+              <li><strong>Wait for the answer.</strong> Simple, but an outage becomes the app's outage.</li>
+              <li class="pick"><strong>A small client library with fallbacks.</strong><span class="pick-tag">Pick</span> It gives up after a short timeout and uses a safe default.</li>
+            </ol>
+            <p>Each app wraps the check in a library with a timeout of about 100 ms. On a timeout or error it uses the last answer it saw, or else a default written in code, usually "off" for new features.</p>
+          </div>
+
+          <div class="reveal">
+            <h4>Final design</h4>
+            <p>The dives added a shared cache and a library that falls back to defaults. Checks (about 10,000 a second) and changes (a few a day) are split into two services, so the check side can be scaled on its own. An <dfn class="term" title="The single front door that sends each request to the right service.">API gateway</dfn> routes by path. The primary database has a <dfn class="term" title="A live copy of a database. It takes over if the main one fails.">replica</dfn> that serves cache misses and takes over on failure. If the cache is lost, checks fall back to the replica, a little slower. A flag a few seconds stale is fine; one stuck wrong is not, so updates delete the cache entry.</p>
+          </div>
+
+          <figure class="diagram-fig" id="2026-11-22-feature-flags-final">
+            <div class="diagram-scroll" tabindex="0" role="group" aria-label="Diagram: the final feature flag design. Scrollable on small screens.">
+              <svg class="diagram" viewBox="0 0 760 680" role="img" aria-labelledby="2026-11-22-feature-flags-d2-t 2026-11-22-feature-flags-d2-d">
+                <title id="2026-11-22-feature-flags-d2-t">Final feature flag design</title>
+                <desc id="2026-11-22-feature-flags-d2-d">The client talks to an API gateway. PUT requests for flags go to the Admin service, which saves the flag row in the primary database and deletes the cache entry. GET check requests go to the Check service, which checks the cache first and reads the replica on a miss, then hashes the user to answer on or off. The primary copies writes to the replica. Signs show the flags table, the cache entry and the replica.</desc>
+<g class="d-node grass" style="--i:0"><rect x="10" y="285" width="80" height="60"/><text class="d-text" x="50" y="320" text-anchor="middle">Client</text></g>
+<path class="d-edge" style="--i:1" d="M90 315H110"/><path class="d-arrow" style="--i:1" d="M104 309L112 315L104 321Z"/><path class="d-arrow" style="--i:1" d="M96 309L88 315L96 321Z"/>
+<g class="d-node" style="--i:1"><rect x="110" y="20" width="90" height="570"/><text class="d-text" x="155" y="295" text-anchor="middle">API</text><text class="d-text" x="155" y="313" text-anchor="middle">gateway</text><text class="d-item" x="118" y="341">- one door</text><text class="d-item" x="118" y="361">- by path</text></g>
+<path class="d-edge accent" style="--i:2" d="M200 160H310"/><path class="d-arrow accent" style="--i:2" d="M304 154L312 160L304 166Z"/><path class="d-arrow accent" style="--i:2" d="M206 154L198 160L206 166Z"/><text class="d-label" style="--i:2" x="255" y="144" text-anchor="middle">PUT</text><text class="d-label" style="--i:2" x="255" y="186" text-anchor="middle">/flags/{name}</text>
+<g class="d-node cmd" style="--i:2"><rect x="310" y="100" width="180" height="120"/><text class="d-text" x="400" y="126" text-anchor="middle">Admin svc</text><text class="d-item" x="320" y="152">- check the percent</text><text class="d-item" x="320" y="172">- save the flag row</text><text class="d-item" x="320" y="192">- then delete the</text><text class="d-item" x="330" y="212">cache entry</text></g>
+<path class="d-edge accent" style="--i:3" d="M490 175H590"/><path class="d-arrow accent" style="--i:3" d="M584 169L592 175L584 181Z"/><text class="d-label" style="--i:3" x="540" y="165" text-anchor="middle">save flag</text>
+<g class="d-node chest" style="--i:3"><rect x="590" y="140" width="160" height="70"/><text class="d-text" x="670" y="168" text-anchor="middle">Primary DB</text><text class="d-sub" x="670" y="190" text-anchor="middle">flags table</text></g>
+<path class="d-line" style="--i:3" d="M670 140V122"/>
+<g class="d-note" style="--i:3"><rect x="560" y="8" width="190" height="114"/><text class="d-note-t" x="572" y="28">flags table</text><text class="d-mono" x="572" y="50">name  PK</text><text class="d-mono" x="572" y="68">enabled, rollout_percent</text><text class="d-mono" x="572" y="86">updated_at</text></g>
+<path class="d-edge accent" style="--i:4" d="M400 220V300"/><path class="d-arrow accent" style="--i:4" d="M394 294L400 302L406 294Z"/><text class="d-label" style="--i:4" x="408" y="264">delete entry</text>
+<g class="d-node gem" style="--i:4"><rect x="310" y="300" width="180" height="70"/><text class="d-text" x="400" y="328" text-anchor="middle">Cache</text><text class="d-sub" x="400" y="350" text-anchor="middle">flag settings</text></g>
+<path class="d-line" style="--i:4" d="M490 335H500"/>
+<g class="d-note" style="--i:4"><rect x="500" y="285" width="200" height="100"/><text class="d-note-t" x="510" y="305">cache entry</text><text class="d-mono" x="510" y="327">flag:{name}</text><text class="d-mono" x="510" y="345">  -> enabled, percent</text><text class="d-mono" x="510" y="363">TTL 60 seconds</text></g>
+<path class="d-edge alt" style="--i:5" d="M200 510H310"/><path class="d-arrow alt" style="--i:5" d="M304 504L312 510L304 516Z"/><path class="d-arrow alt" style="--i:5" d="M206 504L198 510L206 516Z"/><text class="d-label" style="--i:5" x="255" y="494" text-anchor="middle">GET /flags</text><text class="d-label" style="--i:5" x="255" y="536" text-anchor="middle">/{name}/check</text>
+<g class="d-node cmd" style="--i:5"><rect x="310" y="450" width="180" height="120"/><text class="d-text" x="400" y="476" text-anchor="middle">Check svc</text><text class="d-item" x="320" y="502">- settings from cache</text><text class="d-item" x="320" y="522">- on a miss, read DB</text><text class="d-item" x="320" y="542">- hash(name+user) %100</text><text class="d-item" x="320" y="562">- on if below percent</text></g>
+<path class="d-edge alt" style="--i:6" d="M400 450V370"/><path class="d-arrow alt" style="--i:6" d="M394 376L400 368L406 376Z"/><path class="d-arrow alt" style="--i:6" d="M394 444L400 452L406 444Z"/><text class="d-label" style="--i:6" x="408" y="415">check first</text>
+<path class="d-edge alt" style="--i:7" d="M490 510H590"/><path class="d-arrow alt" style="--i:7" d="M584 504L592 510L584 516Z"/><path class="d-arrow alt" style="--i:7" d="M496 504L488 510L496 516Z"/><text class="d-label" style="--i:7" x="540" y="498" text-anchor="middle">on a miss</text>
+<g class="d-node chest" style="--i:7"><rect x="590" y="480" width="160" height="60"/><text class="d-text" x="670" y="506" text-anchor="middle">Replica</text><text class="d-sub" x="670" y="526" text-anchor="middle">serves misses</text></g>
+<path class="d-edge" style="--i:8" d="M670 210V480"/><path class="d-arrow" style="--i:8" d="M664 474L670 482L676 474Z"/><text class="d-label" style="--i:8" x="662" y="430" text-anchor="end">copies writes</text>
+<path class="d-line" style="--i:8" d="M670 540V560"/>
+<g class="d-note" style="--i:8"><rect x="560" y="560" width="190" height="80"/><text class="d-note-t" x="572" y="580">same flags table</text><text class="d-mono" x="572" y="602">read-only copy</text><text class="d-mono" x="572" y="620">takes over on failure</text></g>
+<rect class="d-packet" x="-6" y="-6" width="12" height="12" opacity="0"><animateMotion dur="8s" begin="1.6s" repeatCount="indefinite" keyPoints="0;1;1" keyTimes="0;.5;1" calcMode="linear" path="M90 315H155V160H400V300"/><animate attributeName="opacity" dur="8s" begin="1.6s" repeatCount="indefinite" values="0;1;1;0;0" keyTimes="0;.02;.48;.5;1"/></rect>
+<rect class="d-packet alt" x="-6" y="-6" width="12" height="12" opacity="0"><animateMotion dur="8s" begin="1.6s" repeatCount="indefinite" keyPoints="0;0;1;1" keyTimes="0;.5;.9;1" calcMode="linear" path="M90 315H155V510H400V370"/><animate attributeName="opacity" dur="8s" begin="1.6s" repeatCount="indefinite" values="0;0;1;1;0;0" keyTimes="0;.5;.51;.89;.9;1"/></rect>
+              </svg>
+            </div>
+            <figcaption>The complete system. Gold = a flag change saved, then its cache entry deleted. Cyan = a check reading the settings. Checks and changes are separate services because checks vastly outnumber changes.</figcaption>
+            <button class="replay" type="button" aria-label="Replay diagram animation">Replay</button>
+          </figure>
+
+          <div class="next reveal">
+            <h4>What you could add next</h4>
+            <ul class="next-list">
+              <li>Targeting rules, such as "only users in India" or "only paid plans".</li>
+              <li>An audit log of who changed which flag and when.</li>
+              <li>Push changes to apps over a persistent connection instead of waiting for the cache.</li>
+            </ul>
+          </div>
+        </section>
+
+        <section class="sec reveal" id="2026-11-22-feature-flags-sec-tips">
+          <h3>Interview tips</h3>
+          <dl class="qa">
+            <div><dt>What if a user logs in on two devices?</dt><dd>Same user id, same hash, same answer on both.</dd></div>
+            <div><dt>What happens when you raise 10% to 25%?</dt><dd>Users below 10 stay included, and users 10 to 24 are added.</dd></div>
+            <div><dt>What if the cache holds an old value?</dt><dd>The update deletes the entry, and the 60-second TTL removes anything missed.</dd></div>
+          </dl>
+          <h4>Common mistakes</h4>
+          <ul class="mistakes">
+            <li>Rolling a random number on each check, so users flip between old and new.</li>
+            <li>Letting the app fail when the flag service is slow, instead of using a default.</li>
+          </ul>
+          <aside class="callout tip">
+            <span class="callout-label">Interview tip</span>
+            <p>Say out loud that flags are read thousands of times for every change. It justifies the cache and the split.</p>
+          </aside>
+          <aside class="callout confidence">
+            <span class="callout-label">Confidence note</span>
+            <p>The 1 million users and 10 checks per page load are assumptions. Keeping the tiny flag table in each app's memory is also a valid answer.</p>
+          </aside>
+        </section>
+
+        <p class="sources">Sources: <a href="https://www.hellointerview.com/learn/system-design/in-a-hurry/delivery">Hello Interview, delivery framework</a>; <a href="https://martinfowler.com/articles/feature-toggles.html">Martin Fowler, Feature Toggles</a>; <a href="https://redis.io/docs/latest/commands/expire/">Redis documentation on EXPIRE</a>. This is a common approach, not a claim about any company's internals.</p>
+      </div>
+    </article>
+
     <article class="entry" id="2026-11-21-online-poll" data-topic="Online poll" data-domain="Counters &amp; limits" data-date="2026-11-21" data-level="2">
       <header class="entry-head">
         <div class="entry-meta">
