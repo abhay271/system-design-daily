@@ -420,6 +420,7 @@ dfn.term{font-style:normal;border-bottom:2px dotted var(--accent);cursor:help}
       <h2><svg viewBox="0 0 12 12" aria-hidden="true"><path fill="#7A4A2A" d="M0 2h12v9H0z"/><path fill="#A86A3C" d="M1 3h10v3H1zM1 7h10v3H1z"/><path fill="#E9B526" d="M5 5h2v3H5z"/><path fill="#4A2C18" d="M0 6h5v1H0zM7 6h5v1H7z"/></svg>Archive</h2>
       <ol class="toc">
         <!-- TOC -->
+        <li><a href="#2026-11-23-comment-system"><time datetime="2026-11-23">2026-11-23</time><span>Comment system: load one page at a time, cache the hot first page</span></a></li>
         <li><a href="#2026-11-22-feature-flags"><time datetime="2026-11-22">2026-11-22</time><span>Feature flags</span></a></li>
         <li><a href="#2026-11-21-online-poll"><time datetime="2026-11-21">2026-11-21</time><span>Online poll: one vote each, totals kept in a cache</span></a></li>
         <li><a href="#2026-11-20-online-presence"><time datetime="2026-11-20">2026-11-20</time><span>Online presence: pings that expire, changes that push</span></a></li>
@@ -454,6 +455,252 @@ dfn.term{font-style:normal;border-bottom:2px dotted var(--accent);cursor:help}
 
   <main id="entries" tabindex="-1">
     <!-- ENTRIES -->
+
+    <article class="entry" id="2026-11-23-comment-system" data-topic="Comment system" data-domain="Feeds" data-date="2026-11-23" data-level="2">
+      <header class="entry-head">
+        <div class="entry-meta">
+          <span class="chip">Feeds</span>
+          <span class="level" title="Difficulty: level 2 of 3">Lv 2</span>
+          <time datetime="2026-11-23">23 Nov 2026</time>
+          <span class="read"><span class="read-time">4</span> min read</span>
+        </div>
+        <h2 class="entry-title">Design a comment system</h2>
+        <p class="lede">Under a news article, readers write comments and reply to each other, and replies can have replies. A popular article collects thousands, yet most readers only skim the first screen.</p>
+        <nav class="steps" aria-label="Sections of this design">
+          <a href="#2026-11-23-comment-system-sec-functional">Features</a>
+          <a href="#2026-11-23-comment-system-sec-nonfunctional">Qualities</a>
+          <a href="#2026-11-23-comment-system-sec-entities">Entities</a>
+          <a href="#2026-11-23-comment-system-sec-api">API</a>
+          <a href="#2026-11-23-comment-system-sec-hld">Design</a>
+          <a href="#2026-11-23-comment-system-sec-deepdives">Deep dives</a>
+          <a href="#2026-11-23-comment-system-sec-tips">Tips</a>
+        </nav>
+      </header>
+
+      <div class="prose">
+        <details class="legend">
+          <summary>Legend <span class="hint">6 terms used below</span></summary>
+          <dl>
+            <div><dt>Cursor</dt><dd>A bookmark for "where the last page ended". The client sends it back to get the next page.</dd></div>
+            <div><dt>Index</dt><dd>A sorted lookup list the database keeps, so it can find matching rows without reading the whole table.</dd></div>
+            <div><dt>Cache</dt><dd>A fast store, kept in memory, for data we read very often.</dd></div>
+            <div><dt>TTL</dt><dd>"Time to live": a countdown on a cache entry. When it reaches zero, the entry deletes itself.</dd></div>
+            <div><dt>API gateway</dt><dd>The single front door that sends each request to the right service.</dd></div>
+            <div><dt>Replica</dt><dd>A live copy of a database. It serves reads and takes over if the main one fails.</dd></div>
+          </dl>
+        </details>
+
+        <section class="sec reveal" id="2026-11-23-comment-system-sec-functional">
+          <h3>Functional requirements</h3>
+          <ul class="reqs">
+            <li>Write a comment on a post, or reply to another comment.</li>
+            <li>Read the comments on a post, one page at a time, newest first.</li>
+            <li>Read the replies under one comment.</li>
+          </ul>
+          <p class="out">Out of scope: editing, deleting, votes and ranking, notifications, spam checks, login.</p>
+        </section>
+
+        <section class="sec reveal" id="2026-11-23-comment-system-sec-nonfunctional">
+          <h3>Non-functional requirements</h3>
+          <ul class="reqs nfr">
+            <li><strong>Fast reads.</strong> Many more people read than write, and a slow comment section slows the article.</li>
+            <li><strong>Never load everything.</strong> A hot post may have 50,000 comments.</li>
+            <li><strong>A correct tree.</strong> A reply must sit under a real comment on the same post.</li>
+            <li><strong>No lost comments.</strong> Once we answer "posted", it must stay posted.</li>
+          </ul>
+        </section>
+
+        <section class="sec reveal" id="2026-11-23-comment-system-sec-entities">
+          <h3>Core entities</h3>
+          <ul class="entities">
+            <li><strong>Comment:</strong> the text, its author, its post, and its parent comment (empty for a top-level one).</li>
+          </ul>
+        </section>
+
+        <section class="sec reveal" id="2026-11-23-comment-system-sec-api">
+          <h3>API design</h3>
+          <div class="api-list">
+            <div class="api">
+              <div class="api-sig"><span class="method">POST</span><code>/posts/{id}/comments</code></div>
+              <p>Adds a comment. The author comes from the auth token. 400 if the text is empty or over 2,000 characters, or the parent is on another post. 404 if the post or parent does not exist.</p>
+              <div class="io">
+                <div><span class="io-l">Request body</span><pre>{ "text": "Great read!",
+  "parent_id": null }</pre></div>
+                <div><span class="io-l">Response 201 Created</span><pre>{ "id": 9001,
+  "created_at": "2026-11-23T08:00:00Z" }</pre></div>
+              </div>
+            </div>
+            <div class="api">
+              <div class="api-sig"><span class="method get">GET</span><code>/posts/{id}/comments?cursor=</code></div>
+              <p>Returns one page of top-level comments, newest first. The <dfn class="term" title="A bookmark for &quot;where the last page ended&quot;. The client sends it back to get the next page.">cursor</dfn> is the id of the last comment seen.</p>
+              <div class="io">
+                <div><span class="io-l">Request body</span><pre>(none)</pre></div>
+                <div><span class="io-l">Response 200 OK</span><pre>{ "comments": [
+    { "id": 9001, "text": "...",
+      "reply_count": 4 } ],
+  "next_cursor": 8980 }</pre></div>
+              </div>
+            </div>
+            <div class="api">
+              <div class="api-sig"><span class="method get">GET</span><code>/comments/{id}/replies?cursor=</code></div>
+              <p>Same shape, for the replies under one comment, oldest first so a conversation reads in order. 404 if the comment does not exist.</p>
+              <div class="io">
+                <div><span class="io-l">Request body</span><pre>(none)</pre></div>
+                <div><span class="io-l">Response 200 OK</span><pre>{ "comments": [ ... ],
+  "next_cursor": null }</pre></div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="sec" id="2026-11-23-comment-system-sec-hld">
+          <h3>High-level design</h3>
+          <div class="reveal">
+            <p>Assume 5 million new comments a month, about 2 a second, and 100 reads for every write, about 200 reads a second (assumptions). One database handles that, so no sharding yet. Servers are identical, keep no data, and sit behind a load balancer.</p>
+            <h4>1. Write a comment or reply</h4>
+            <p>The server checks the text, and, for a reply, that the parent exists on the same post. It then saves one row. The database hands out the next id, so ids grow with time. A reply stores its parent's id.</p>
+            <h4>2. Read comments and replies</h4>
+            <p>The top-level query is "comments of this post with no parent, newest first". The reply query is "comments whose parent is this one". An <dfn class="term" title="A sorted lookup list the database keeps, so it can find matching rows without reading the whole table.">index</dfn> serves each, and the cursor means "id below the last one seen".</p>
+            <div class="table-scroll">
+              <table class="schema">
+                <caption>Table: comments</caption>
+                <thead><tr><th>Column</th><th>Type</th><th>Note</th></tr></thead>
+                <tbody>
+                  <tr><td>id</td><td>bigint</td><td>primary key, from a database sequence</td></tr>
+                  <tr><td>post_id</td><td>bigint</td><td>index (post_id, id) for top-level pages</td></tr>
+                  <tr><td>parent_id</td><td>bigint</td><td>empty for top-level; index (parent_id, id) for replies</td></tr>
+                  <tr><td>user_id, text</td><td>bigint, text</td><td>author and body</td></tr>
+                  <tr><td>reply_count</td><td>int</td><td>shown as "4 replies"</td></tr>
+                  <tr><td>created_at</td><td>time</td><td>when it was posted</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <figure class="diagram-fig">
+            <div class="diagram-scroll" tabindex="0" role="group" aria-label="Diagram: simple comment system. Scrollable on small screens.">
+              <svg class="diagram" viewBox="0 0 760 340" role="img" aria-labelledby="2026-11-23-comment-system-d1-t 2026-11-23-comment-system-d1-d">
+                <title id="2026-11-23-comment-system-d1-t">Simple comment system</title>
+                <desc id="2026-11-23-comment-system-d1-d">The client sends new comments and page requests to the app servers. The app servers save a comment row in the database and read pages of comments back. A sign shows the comments table.</desc>
+<g class="d-node grass" style="--i:0"><rect x="8" y="90" width="82" height="60"/><text class="d-text" x="49" y="125" text-anchor="middle">Client</text></g>
+<path class="d-edge" style="--i:1" d="M90 120H180"/><path class="d-arrow" style="--i:1" d="M174 114L182 120L174 126Z"/><path class="d-arrow" style="--i:1" d="M96 114L88 120L96 126Z"/><text class="d-label" style="--i:1" x="135" y="110" text-anchor="middle">comment</text><text class="d-label" style="--i:1" x="135" y="140" text-anchor="middle">get page</text>
+<g class="d-node cmd" style="--i:2"><rect x="180" y="60" width="190" height="94"/><text class="d-text" x="275" y="86" text-anchor="middle">App servers</text><text class="d-item" x="192" y="112">- check text and parent</text><text class="d-item" x="192" y="132">- save the comment row</text><text class="d-item" x="192" y="152">- read a page by cursor</text></g>
+<path class="d-edge accent" style="--i:3" d="M370 90H570"/><path class="d-arrow accent" style="--i:3" d="M564 84L572 90L564 96Z"/><text class="d-label" style="--i:3" x="470" y="80" text-anchor="middle">save row</text>
+<path class="d-edge alt" style="--i:4" d="M370 128H570"/><path class="d-arrow alt" style="--i:4" d="M564 122L572 128L564 134Z"/><path class="d-arrow alt" style="--i:4" d="M376 122L368 128L376 134Z"/><text class="d-label" style="--i:4" x="470" y="118" text-anchor="middle">read page</text>
+<g class="d-node chest" style="--i:3"><rect x="570" y="60" width="170" height="94"/><text class="d-text" x="655" y="92" text-anchor="middle">Database</text><text class="d-sub" x="655" y="114" text-anchor="middle">one table</text></g>
+<path class="d-line" style="--i:3" d="M655 154V200"/>
+<g class="d-note" style="--i:3"><rect x="560" y="200" width="190" height="100"/><text class="d-note-t" x="572" y="220">comments table</text><text class="d-mono" x="572" y="242">id  PK</text><text class="d-mono" x="572" y="260">post_id, parent_id</text><text class="d-mono" x="572" y="278">user_id, text, created_at</text></g>
+<rect class="d-packet" x="-6" y="-6" width="12" height="12" opacity="0"><animateMotion dur="8s" begin="1.4s" repeatCount="indefinite" keyPoints="0;1;1" keyTimes="0;.4;1" calcMode="linear" path="M90 120H275V90H570"/><animate attributeName="opacity" dur="8s" begin="1.4s" repeatCount="indefinite" values="0;1;1;0;0" keyTimes="0;.02;.38;.4;1"/></rect>
+<rect class="d-packet alt" x="-6" y="-6" width="12" height="12" opacity="0"><animateMotion dur="8s" begin="1.4s" repeatCount="indefinite" keyPoints="0;0;1;1" keyTimes="0;.4;.8;1" calcMode="linear" path="M90 120H275V128H570"/><animate attributeName="opacity" dur="8s" begin="1.4s" repeatCount="indefinite" values="0;0;1;1;0;0" keyTimes="0;.4;.41;.79;.8;1"/></rect>
+              </svg>
+            </div>
+            <figcaption>The starting point. Gold = a comment being saved, cyan = a page being read. Every page view hits the database, which is what a hot post will overwhelm.</figcaption>
+            <button class="replay" type="button" aria-label="Replay diagram animation">Replay</button>
+          </figure>
+
+          <aside class="callout why reveal">
+            <span class="callout-label">Why</span>
+            <p><strong>Why store only the parent id?</strong> One small row per comment keeps writes cheap and the tree correct. Replies load a level at a time, so nothing more is needed.</p>
+          </aside>
+        </section>
+
+        <section class="sec" id="2026-11-23-comment-system-sec-deepdives">
+          <h3>Deep dives</h3>
+          <div class="dive reveal">
+            <h4>How do we page through thousands of comments?</h4>
+            <p>The reader needs the first screen now, and more only on scrolling.</p>
+            <ol class="options">
+              <li><strong>Send every comment at once.</strong> Simple, but a hot post means a huge, slow response.</li>
+              <li><strong>Page numbers (offset).</strong> The database skips rows it then throws away, and new comments shift every page.</li>
+              <li class="pick"><strong>A cursor on the id.</strong><span class="pick-tag">Pick</span> "20 comments with id below this one" jumps straight to the spot through the index, and new comments never shift it.</li>
+            </ol>
+            <p>Each page holds 20 top-level comments with a <code>reply_count</code>. Replies load only when the reader taps "show replies", the same way, 20 at a time.</p>
+          </div>
+
+          <div class="dive reveal">
+            <h4>How do we keep a hot post fast?</h4>
+            <p>Thousands of readers ask for the same first page.</p>
+            <ol class="options">
+              <li><strong>Read the database every time.</strong> Always fresh, but it repeats the same query again and again.</li>
+              <li><strong>Delete the cached page on every new comment.</strong> Fresh, but a busy post empties the cache constantly.</li>
+              <li class="pick"><strong>Cache the first page with a short expiry.</strong><span class="pick-tag">Pick</span> Cheap, and a few seconds of staleness is fine here.</li>
+            </ol>
+            <p>The <dfn class="term" title="A fast store, kept in memory, for data we read very often.">cache</dfn> maps <code>comments:{post_id}</code> to the first page. The read service looks there first and, on a miss, reads the replica and fills the cache with a 30-second <dfn class="term" title="&quot;Time to live&quot;: a countdown on a cache entry. When it reaches zero, the entry deletes itself.">TTL</dfn>. Later pages are rarely requested, so they skip the cache.</p>
+          </div>
+
+          <div class="reveal">
+            <h4>Final design</h4>
+            <p>The dives added cursor pages and a cached first page. Reads outnumber writes about 100 to 1, so they are split into two services and the read side can be scaled alone. An <dfn class="term" title="The single front door that sends each request to the right service.">API gateway</dfn> routes by path. The primary database has a <dfn class="term" title="A live copy of a database. It serves reads and takes over if the main one fails.">replica</dfn> that serves cache misses and takes over on failure. If the cache is lost, reads fall back to the replica, a little slower. Slightly old pages are fine, but the parent check and save use the primary, because a lost comment is not.</p>
+          </div>
+
+          <figure class="diagram-fig" id="2026-11-23-comment-system-final">
+            <div class="diagram-scroll" tabindex="0" role="group" aria-label="Diagram: the final comment system design. Scrollable on small screens.">
+              <svg class="diagram" viewBox="0 0 760 680" role="img" aria-labelledby="2026-11-23-comment-system-d2-t 2026-11-23-comment-system-d2-d">
+                <title id="2026-11-23-comment-system-d2-t">Final comment system design</title>
+                <desc id="2026-11-23-comment-system-d2-d">The client talks to an API gateway. POST requests for comments go to the Write service, which checks the parent and saves the comment row in the primary database. GET requests for pages go to the Read service, which checks the cache first and reads the replica on a miss. The primary copies writes to the replica. Signs show the comments table, the cache entry and the replica.</desc>
+<g class="d-node grass" style="--i:0"><rect x="10" y="285" width="80" height="60"/><text class="d-text" x="50" y="320" text-anchor="middle">Client</text></g>
+<path class="d-edge" style="--i:1" d="M90 315H110"/><path class="d-arrow" style="--i:1" d="M104 309L112 315L104 321Z"/><path class="d-arrow" style="--i:1" d="M96 309L88 315L96 321Z"/>
+<g class="d-node" style="--i:1"><rect x="110" y="20" width="90" height="570"/><text class="d-text" x="155" y="295" text-anchor="middle">API</text><text class="d-text" x="155" y="313" text-anchor="middle">gateway</text><text class="d-item" x="118" y="341">- one door</text><text class="d-item" x="118" y="361">- by path</text></g>
+<path class="d-edge accent" style="--i:2" d="M200 160H310"/><path class="d-arrow accent" style="--i:2" d="M304 154L312 160L304 166Z"/><path class="d-arrow accent" style="--i:2" d="M206 154L198 160L206 166Z"/><text class="d-label" style="--i:2" x="255" y="144" text-anchor="middle">POST</text><text class="d-label" style="--i:2" x="255" y="182" text-anchor="middle">/posts/{id}</text><text class="d-label" style="--i:2" x="255" y="198" text-anchor="middle">/comments</text>
+<g class="d-node cmd" style="--i:2"><rect x="310" y="100" width="180" height="120"/><text class="d-text" x="400" y="126" text-anchor="middle">Write svc</text><text class="d-item" x="320" y="152">- check text, length</text><text class="d-item" x="320" y="172">- parent on this post?</text><text class="d-item" x="320" y="192">- save the comment row</text><text class="d-item" x="320" y="212">- answer 201</text></g>
+<path class="d-edge accent" style="--i:3" d="M490 175H590"/><path class="d-arrow accent" style="--i:3" d="M584 169L592 175L584 181Z"/><text class="d-label" style="--i:3" x="540" y="165" text-anchor="middle">save row</text>
+<g class="d-node chest" style="--i:3"><rect x="590" y="140" width="160" height="70"/><text class="d-text" x="670" y="168" text-anchor="middle">Primary DB</text><text class="d-sub" x="670" y="190" text-anchor="middle">comments table</text></g>
+<path class="d-line" style="--i:3" d="M670 140V122"/>
+<g class="d-note" style="--i:3"><rect x="560" y="8" width="190" height="114"/><text class="d-note-t" x="572" y="28">comments table</text><text class="d-mono" x="572" y="50">id  PK (sequence)</text><text class="d-mono" x="572" y="68">post_id, parent_id</text><text class="d-mono" x="572" y="86">user_id, text, reply_count</text><text class="d-mono" x="572" y="104">created_at</text></g>
+<g class="d-node gem" style="--i:4"><rect x="310" y="300" width="180" height="70"/><text class="d-text" x="400" y="328" text-anchor="middle">Cache</text><text class="d-sub" x="400" y="350" text-anchor="middle">first pages</text></g>
+<path class="d-line" style="--i:4" d="M490 335H500"/>
+<g class="d-note" style="--i:4"><rect x="500" y="285" width="200" height="100"/><text class="d-note-t" x="510" y="305">cache entry</text><text class="d-mono" x="510" y="327">comments:{post_id}</text><text class="d-mono" x="510" y="345">  -> first page</text><text class="d-mono" x="510" y="363">TTL 30 seconds</text></g>
+<path class="d-edge alt" style="--i:5" d="M200 510H310"/><path class="d-arrow alt" style="--i:5" d="M304 504L312 510L304 516Z"/><path class="d-arrow alt" style="--i:5" d="M206 504L198 510L206 516Z"/><text class="d-label" style="--i:5" x="255" y="488" text-anchor="middle">GET</text><text class="d-label" style="--i:5" x="255" y="532" text-anchor="middle">/posts/{id}</text><text class="d-label" style="--i:5" x="255" y="548" text-anchor="middle">/comments</text>
+<g class="d-node cmd" style="--i:5"><rect x="310" y="450" width="180" height="120"/><text class="d-text" x="400" y="476" text-anchor="middle">Read svc</text><text class="d-item" x="320" y="502">- first page: cache</text><text class="d-item" x="320" y="522">- on a miss, replica</text><text class="d-item" x="320" y="542">- later pages: by cursor</text><text class="d-item" x="320" y="562">- replies on demand</text></g>
+<path class="d-edge alt" style="--i:6" d="M400 450V370"/><path class="d-arrow alt" style="--i:6" d="M394 376L400 368L406 376Z"/><path class="d-arrow alt" style="--i:6" d="M394 444L400 452L406 444Z"/><text class="d-label" style="--i:6" x="408" y="415">check first</text>
+<path class="d-edge alt" style="--i:7" d="M490 510H590"/><path class="d-arrow alt" style="--i:7" d="M584 504L592 510L584 516Z"/><path class="d-arrow alt" style="--i:7" d="M496 504L488 510L496 516Z"/><text class="d-label" style="--i:7" x="540" y="498" text-anchor="middle">on a miss</text>
+<g class="d-node chest" style="--i:7"><rect x="590" y="480" width="160" height="60"/><text class="d-text" x="670" y="506" text-anchor="middle">Replica</text><text class="d-sub" x="670" y="526" text-anchor="middle">serves misses</text></g>
+<path class="d-edge" style="--i:8" d="M720 210V480"/><path class="d-arrow" style="--i:8" d="M714 474L720 482L726 474Z"/><text class="d-label" style="--i:8" x="712" y="430" text-anchor="end">copies writes</text>
+<path class="d-line" style="--i:8" d="M670 540V560"/>
+<g class="d-note" style="--i:8"><rect x="560" y="560" width="190" height="80"/><text class="d-note-t" x="572" y="580">same comments table</text><text class="d-mono" x="572" y="602">read-only copy</text><text class="d-mono" x="572" y="620">takes over on failure</text></g>
+<rect class="d-packet" x="-6" y="-6" width="12" height="12" opacity="0"><animateMotion dur="8s" begin="1.6s" repeatCount="indefinite" keyPoints="0;1;1" keyTimes="0;.5;1" calcMode="linear" path="M90 315H155V160H400V175H590"/><animate attributeName="opacity" dur="8s" begin="1.6s" repeatCount="indefinite" values="0;1;1;0;0" keyTimes="0;.02;.48;.5;1"/></rect>
+<rect class="d-packet alt" x="-6" y="-6" width="12" height="12" opacity="0"><animateMotion dur="8s" begin="1.6s" repeatCount="indefinite" keyPoints="0;0;1;1" keyTimes="0;.5;.9;1" calcMode="linear" path="M90 315H155V510H400V370"/><animate attributeName="opacity" dur="8s" begin="1.6s" repeatCount="indefinite" values="0;0;1;1;0;0" keyTimes="0;.5;.51;.89;.9;1"/></rect>
+              </svg>
+            </div>
+            <figcaption>The complete system. Gold = a comment saved by the Write service. Cyan = a page read from the cache, or the replica on a miss. Replies are read the same way through GET /comments/{id}/replies. Reads and writes are separate services because reads vastly outnumber writes.</figcaption>
+            <button class="replay" type="button" aria-label="Replay diagram animation">Replay</button>
+          </figure>
+
+          <div class="next reveal">
+            <h4>What you could add next</h4>
+            <ul class="next-list">
+              <li>Sort by votes ("best") instead of newest.</li>
+              <li>Notify the author of a comment when someone replies, through a queue.</li>
+              <li>Split the table by post id if one database fills up.</li>
+            </ul>
+          </div>
+        </section>
+
+        <section class="sec reveal" id="2026-11-23-comment-system-sec-tips">
+          <h3>Interview tips</h3>
+          <dl class="qa">
+            <div><dt>How do you stop replies nesting forever?</dt><dd>Store a depth, and attach anything deeper than 5 levels to the level-5 comment.</dd></div>
+            <div><dt>What if two people reply at the same moment?</dt><dd>Each insert gets its own id, so both are saved and order by id.</dd></div>
+            <div><dt>How do you show "4 replies"?</dt><dd>Keep a reply_count on the parent, updated in the same save as the reply.</dd></div>
+          </dl>
+          <h4>Common mistakes</h4>
+          <ul class="mistakes">
+            <li>Loading the whole thread in one request.</li>
+            <li>Paging by page number, so new comments shift the pages.</li>
+          </ul>
+          <aside class="callout tip">
+            <span class="callout-label">Interview tip</span>
+            <p>Start from the screen: 20 comments, then replies on a tap. The cursor and cache follow.</p>
+          </aside>
+          <aside class="callout confidence">
+            <span class="callout-label">Confidence note</span>
+            <p>The 5 million comments a month and the 100-to-1 read ratio are assumptions. Storing a full path per comment is also valid.</p>
+          </aside>
+        </section>
+
+        <p class="sources">Sources: <a href="https://www.hellointerview.com/learn/system-design/in-a-hurry/delivery">Hello Interview, delivery framework</a>; <a href="https://redis.io/docs/latest/commands/expire/">Redis documentation on EXPIRE</a>; <a href="https://use-the-index-luke.com/no-offset">Use The Index, Luke: paging without OFFSET</a>. This is a common approach, not a claim about any company's internals.</p>
+      </div>
+    </article>
 
     <article class="entry" id="2026-11-22-feature-flags" data-topic="Feature flags" data-domain="Read-heavy lookup" data-date="2026-11-22" data-level="2">
       <header class="entry-head">
