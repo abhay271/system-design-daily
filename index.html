@@ -420,6 +420,7 @@ dfn.term{font-style:normal;border-bottom:2px dotted var(--accent);cursor:help}
       <h2><svg viewBox="0 0 12 12" aria-hidden="true"><path fill="#7A4A2A" d="M0 2h12v9H0z"/><path fill="#A86A3C" d="M1 3h10v3H1zM1 7h10v3H1z"/><path fill="#E9B526" d="M5 5h2v3H5z"/><path fill="#4A2C18" d="M0 6h5v1H0zM7 6h5v1H7z"/></svg>Archive</h2>
       <ol class="toc">
         <!-- TOC -->
+        <li><a href="#2026-11-26-webhook-delivery"><time datetime="2026-11-26">2026-11-26</time><span>Webhook delivery: queue the sends, retry with growing waits</span></a></li>
         <li><a href="#2026-11-25-delivery-tracking"><time datetime="2026-11-25">2026-11-25</time><span>Delivery tracking: keep only the latest point in memory</span></a></li>
         <li><a href="#2026-11-24-trending-topics"><time datetime="2026-11-24">2026-11-24</time><span>Trending topics: count in batches, serve a ready list</span></a></li>
         <li><a href="#2026-11-23-comment-system"><time datetime="2026-11-23">2026-11-23</time><span>Comment system: load one page at a time, cache the hot first page</span></a></li>
@@ -457,6 +458,265 @@ dfn.term{font-style:normal;border-bottom:2px dotted var(--accent);cursor:help}
 
   <main id="entries" tabindex="-1">
     <!-- ENTRIES -->
+    <article class="entry" id="2026-11-26-webhook-delivery" data-topic="Webhook delivery" data-domain="Queues &amp; async jobs" data-date="2026-11-26" data-level="2">
+      <header class="entry-head">
+        <div class="entry-meta">
+          <span class="chip">Queues &amp; async jobs</span>
+          <span class="level" title="Difficulty: level 2 of 3">Lv 2</span>
+          <time datetime="2026-11-26">26 Nov 2026</time>
+          <span class="read"><span class="read-time">4</span> min read</span>
+        </div>
+        <h2 class="entry-title">Design a webhook delivery service</h2>
+        <p class="lede">Your build starts a minute after you push code because GitHub called your server. That call is a <dfn class="term" title="A message our system sends to a web address the customer gave us, to say something happened.">webhook</dfn>: "this happened, here are the details". Sending thousands a second to slow or broken servers without losing any is the interview.</p>
+        <nav class="steps" aria-label="Sections of this design">
+          <a href="#2026-11-26-webhook-delivery-sec-functional">Features</a>
+          <a href="#2026-11-26-webhook-delivery-sec-nonfunctional">Qualities</a>
+          <a href="#2026-11-26-webhook-delivery-sec-entities">Entities</a>
+          <a href="#2026-11-26-webhook-delivery-sec-api">API</a>
+          <a href="#2026-11-26-webhook-delivery-sec-hld">Design</a>
+          <a href="#2026-11-26-webhook-delivery-sec-deepdives">Deep dives</a>
+          <a href="#2026-11-26-webhook-delivery-sec-tips">Tips</a>
+        </nav>
+      </header>
+
+      <div class="prose">
+        <details class="legend">
+          <summary>Legend <span class="hint">7 terms used below</span></summary>
+          <dl>
+            <div><dt>Webhook</dt><dd>A message our system sends to a web address the customer gave us, to say something happened.</dd></div>
+            <div><dt>Queue</dt><dd>A waiting line of jobs. One side adds jobs, the other side takes them when it is ready.</dd></div>
+            <div><dt>Worker</dt><dd>A program that takes jobs off a queue and does them, one at a time.</dd></div>
+            <div><dt>Backoff</dt><dd>Waiting longer after each failed try: 1 minute, then 5, then 30.</dd></div>
+            <div><dt>Signature</dt><dd>A code made from the message and a shared secret. Only someone with the secret can make a matching one.</dd></div>
+            <div><dt>API gateway</dt><dd>The single front door that sends each request to the right service.</dd></div>
+            <div><dt>Replica</dt><dd>A live copy of a database. It serves reads and takes over if the main one fails.</dd></div>
+          </dl>
+        </details>
+
+        <section class="sec reveal" id="2026-11-26-webhook-delivery-sec-functional">
+          <h3>Functional requirements</h3>
+          <ul class="reqs">
+            <li>A customer registers a URL and the event types they want.</li>
+            <li>When an event happens, we send it to every matching URL.</li>
+            <li>Failed sends are retried, and the customer can see every attempt.</li>
+          </ul>
+          <p class="out">Out of scope: creating the events, a dashboard UI, changing payloads, billing.</p>
+        </section>
+
+        <section class="sec reveal" id="2026-11-26-webhook-delivery-sec-nonfunctional">
+          <h3>Non-functional requirements</h3>
+          <ul class="reqs nfr">
+            <li><strong>Never lose an event.</strong> A missing "payment succeeded" can mean a lost sale.</li>
+            <li><strong>Isolated.</strong> One slow customer must not delay the others.</li>
+            <li><strong>Fast sender.</strong> The system that produces events must not wait on strangers' servers.</li>
+            <li><strong>Verifiable.</strong> The receiver must know a call really came from us.</li>
+          </ul>
+        </section>
+
+        <section class="sec reveal" id="2026-11-26-webhook-delivery-sec-entities">
+          <h3>Core entities</h3>
+          <ul class="entities">
+            <li><strong>Endpoint:</strong> an owner, a URL, a secret and one event type.</li>
+            <li><strong>Event:</strong> a type and a body, created once.</li>
+            <li><strong>Delivery:</strong> one event going to one endpoint, with its status, attempts and next try time.</li>
+          </ul>
+        </section>
+
+        <section class="sec reveal" id="2026-11-26-webhook-delivery-sec-api">
+          <h3>API design</h3>
+          <div class="api-list">
+            <div class="api">
+              <div class="api-sig"><span class="method">POST</span><code>/endpoints</code></div>
+              <p>400 if the URL is not https or points at a private address. The secret is shown only this once.</p>
+              <div class="io">
+                <div><span class="io-l">Request body</span><pre>{ "url": "https://shop.example/hooks",
+  "event_type": "order.paid" }</pre></div>
+                <div><span class="io-l">Response 201 Created</span><pre>{ "endpoint_id": "...", "secret": "whsec_..." }</pre></div>
+              </div>
+            </div>
+            <div class="api">
+              <div class="api-sig"><span class="method">POST</span><code>/events</code></div>
+              <p>Called by our other systems. 202 Accepted, not 201, because sending happens later.</p>
+              <div class="io">
+                <div><span class="io-l">Request body</span><pre>{ "type": "order.paid",
+  "body": { "order_id": "42" } }</pre></div>
+                <div><span class="io-l">Response 202 Accepted</span><pre>{ "event_id": "..." }</pre></div>
+              </div>
+            </div>
+            <div class="api">
+              <div class="api-sig"><span class="method get">GET</span><code>/endpoints/{id}/deliveries?cursor=...</code></div>
+              <p>One page, newest first. 404 if the endpoint is not the caller's.</p>
+              <div class="io">
+                <div><span class="io-l">Request body</span><pre>(none)</pre></div>
+                <div><span class="io-l">Response 200 OK</span><pre>{ "items": [ { "delivery_id": "...",
+    "status": "failed", "attempts": 5,
+    "last_code": 503 } ],
+  "next_cursor": "..." }</pre></div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="sec" id="2026-11-26-webhook-delivery-sec-hld">
+          <h3>High-level design</h3>
+          <div class="reveal">
+            <p>Assume 1,000 events a second at peak and 3 matching URLs per event (assumptions): 3,000 deliveries a second, each a call to someone else's server. Servers are identical, keep no data, and sit behind a load balancer.</p>
+            <h4>1. Register an endpoint</h4>
+            <p>Save a row with the URL and a random secret. Ids are UUIDs.</p>
+            <h4>2. Send an event</h4>
+            <p>Save the event. Find the endpoints with the same owner and type, using an index. Make a delivery row per endpoint, call each URL and record the answer.</p>
+            <h4>3. See the history</h4>
+            <p>Read the deliveries of one endpoint, newest first, one page at a time.</p>
+            <div class="table-scroll">
+              <table class="schema">
+                <caption>Tables: endpoints, events and deliveries</caption>
+                <thead><tr><th>Column</th><th>Type</th><th>Note</th></tr></thead>
+                <tbody>
+                  <tr><td>endpoints.endpoint_id</td><td>uuid</td><td>primary key; index on (owner_id, event_type) finds the matches</td></tr>
+                  <tr><td>endpoints.url, secret</td><td>text</td><td>where to send, and the signing secret</td></tr>
+                  <tr><td>events.event_id</td><td>uuid</td><td>primary key; type and body</td></tr>
+                  <tr><td>deliveries.delivery_id</td><td>uuid</td><td>primary key; one per event and endpoint</td></tr>
+                  <tr><td>deliveries.status, attempts, next_attempt_at</td><td>text, int, time</td><td>pending, sent or failed; index on (status, next_attempt_at) finds due work</td></tr>
+                  <tr><td>deliveries.endpoint_id, created_at</td><td>uuid, time</td><td>index on both serves the history page</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <figure class="diagram-fig">
+            <div class="diagram-scroll" tabindex="0" role="group" aria-label="Diagram: simple webhook delivery. Scrollable on small screens.">
+              <svg class="diagram" viewBox="0 0 760 390" role="img" aria-labelledby="2026-11-26-webhook-delivery-d1-t 2026-11-26-webhook-delivery-d1-d">
+                <title id="2026-11-26-webhook-delivery-d1-t">Simple webhook delivery</title>
+                <desc id="2026-11-26-webhook-delivery-d1-d">The client sends a new event to the app servers. The app servers save the event and delivery rows in the database, then call the subscriber's server directly and wait. A sign shows the three tables.</desc>
+<g class="d-node grass" style="--i:0"><rect x="8" y="152" width="82" height="60"/><text class="d-text" x="49" y="187" text-anchor="middle">Client</text></g>
+<path class="d-edge accent" style="--i:1" d="M90 182H180"/><path class="d-arrow accent" style="--i:1" d="M174 176L182 182L174 188Z"/><text class="d-label" style="--i:1" x="135" y="172" text-anchor="middle">new event</text>
+<g class="d-node cmd" style="--i:2"><rect x="180" y="135" width="190" height="94"/><text class="d-text" x="275" y="161" text-anchor="middle">App servers</text><text class="d-item" x="192" y="187">- save event + deliveries</text><text class="d-item" x="192" y="207">- POST to every URL</text><text class="d-item" x="192" y="227">- wait, record result</text></g>
+<path class="d-edge accent" style="--i:3" d="M370 182H570"/><path class="d-arrow accent" style="--i:3" d="M564 176L572 182L564 188Z"/><text class="d-label" style="--i:3" x="470" y="172" text-anchor="middle">save rows</text>
+<g class="d-node chest" style="--i:3"><rect x="570" y="135" width="170" height="94"/><text class="d-text" x="655" y="167" text-anchor="middle">Database</text><text class="d-sub" x="655" y="189" text-anchor="middle">three tables</text></g>
+<path class="d-line" style="--i:3" d="M655 135V105"/>
+<g class="d-note" style="--i:3"><rect x="540" y="5" width="210" height="100"/><text class="d-note-t" x="552" y="25">database tables</text><text class="d-mono" x="552" y="47">endpoints  endpoint_id PK</text><text class="d-mono" x="552" y="65">events  event_id  PK</text><text class="d-mono" x="552" y="83">deliveries  delivery_id PK</text></g>
+<path class="d-edge alt" style="--i:4" d="M275 229V335H570"/><path class="d-arrow alt" style="--i:4" d="M564 329L572 335L564 341Z"/><text class="d-label" style="--i:4" x="420" y="323" text-anchor="middle">POST event</text>
+<g class="d-node" style="--i:4"><rect x="570" y="300" width="170" height="70"/><text class="d-text" x="655" y="328" text-anchor="middle">Subscriber</text><text class="d-sub" x="655" y="350" text-anchor="middle">customer's server</text></g>
+<rect class="d-packet" x="-6" y="-6" width="12" height="12" opacity="0"><animateMotion dur="8s" begin="1.4s" repeatCount="indefinite" keyPoints="0;1;1" keyTimes="0;.4;1" calcMode="linear" path="M90 182H570"/><animate attributeName="opacity" dur="8s" begin="1.4s" repeatCount="indefinite" values="0;1;1;0;0" keyTimes="0;.02;.38;.4;1"/></rect>
+<rect class="d-packet alt" x="-6" y="-6" width="12" height="12" opacity="0"><animateMotion dur="8s" begin="1.4s" repeatCount="indefinite" keyPoints="0;0;1;1" keyTimes="0;.4;.8;1" calcMode="linear" path="M90 182H275V335H570"/><animate attributeName="opacity" dur="8s" begin="1.4s" repeatCount="indefinite" values="0;0;1;1;0;0" keyTimes="0;.4;.41;.79;.8;1"/></rect>
+              </svg>
+            </div>
+            <figcaption>The starting point. Gold = an event saved, cyan = the call to the subscriber. It works, but the sender waits for every subscriber, and a crash mid-way loses the rest.</figcaption>
+            <button class="replay" type="button" aria-label="Replay diagram animation">Replay</button>
+          </figure>
+
+          <aside class="callout why reveal">
+            <span class="callout-label">Why</span>
+            <p><strong>Why one delivery row per endpoint?</strong> One URL may be down while another works. A row each lets us retry and show history per URL.</p>
+          </aside>
+        </section>
+
+        <section class="sec" id="2026-11-26-webhook-delivery-sec-deepdives">
+          <h3>Deep dives</h3>
+          <div class="dive reveal">
+            <h4>How do we keep the sender fast and the subscribers isolated?</h4>
+            <p>Calling URLs inside the request makes it as slow as the slowest one.</p>
+            <ol class="options">
+              <li><strong>Call every URL during the request.</strong> Simple, but one hung server stalls the sender.</li>
+              <li><strong>Send from a background thread.</strong> Faster, but jobs vanish if the server restarts.</li>
+              <li class="pick"><strong>Put a job on a queue for workers.</strong><span class="pick-tag">Pick</span> Jobs survive restarts, and we add workers for more load.</li>
+            </ol>
+            <p>The event service saves the rows, puts one job per delivery on a <dfn class="term" title="A waiting line of jobs. One side adds jobs, the other side takes them when it is ready.">queue</dfn> holding just the delivery id, and answers 202. A <dfn class="term" title="A program that takes jobs off a queue and does them, one at a time.">worker</dfn> gives each call a 5-second timeout, so a hung customer holds one worker briefly and never the sender. If the queue goes down, the rows are already saved as pending, and the sweep below puts them back.</p>
+          </div>
+
+          <div class="dive reveal">
+            <h4>How do we deliver reliably when subscribers fail?</h4>
+            <p>Servers go down and time out.</p>
+            <ol class="options">
+              <li><strong>Try once.</strong> Simplest, but any blip loses the event.</li>
+              <li><strong>Retry at once, in a loop.</strong> Hammers a server that is already struggling.</li>
+              <li class="pick"><strong>Retry with growing waits, then stop.</strong><span class="pick-tag">Pick</span> Gives a server time to recover, and the failure stays visible.</li>
+            </ol>
+            <p>A 2xx answer means success. Anything else (error, 429, timeout) is a failure, so the worker sets <code>next_attempt_at</code> using <dfn class="term" title="Waiting longer after each failed try: 1 minute, then 5, then 30.">backoff</dfn> (for example 1 minute, 5 minutes, 30 minutes, 2 hours, 12 hours), then marks it failed. Every 30 seconds a sweep finds due rows through the index and queues them. Delivery is at-least-once: a worker may crash after the call but before saving, so a customer can get an event twice. Each call carries the event id for de-duplication and a <dfn class="term" title="A code made from the message and a shared secret. Only someone with the secret can make a matching one.">signature</dfn> header made from the body and the endpoint's secret.</p>
+          </div>
+
+          <div class="reveal">
+            <h4>Final design</h4>
+            <p>The dives added the queue, and workers that also run the retry sweep. Four services split the work: registering is rare, events are a flood of writes, history is reads, and workers make slow outside calls. An <dfn class="term" title="The single front door that sends each request to the right service.">API gateway</dfn> routes by path. Rows live in the primary database. The history service reads a <dfn class="term" title="A live copy of a database. It serves reads and takes over if the main one fails.">replica</dfn>, which also takes over if the primary fails. A stale history page is fine; events and deliveries always go to the primary.</p>
+          </div>
+
+          <figure class="diagram-fig" id="2026-11-26-webhook-delivery-final">
+            <div class="diagram-scroll" tabindex="0" role="group" aria-label="Diagram: the final webhook delivery design. Scrollable on small screens.">
+              <svg class="diagram" viewBox="0 0 760 1190" role="img" aria-labelledby="2026-11-26-webhook-delivery-d2-t 2026-11-26-webhook-delivery-d2-d">
+                <title id="2026-11-26-webhook-delivery-d2-t">Final webhook delivery design</title>
+                <desc id="2026-11-26-webhook-delivery-d2-d">The client talks to an API gateway. POST /endpoints goes to the Endpoint service, which saves a row in the primary database. POST /events goes to the Event service, which saves the event and delivery rows in the primary and puts one job per delivery on the queue. The Worker takes jobs from the queue, calls the subscriber with a signature, and logs the result in the primary. The worker also sweeps the primary for due retries and queues them again. GET /endpoints/{id}/deliveries goes to the History service, which reads the replica. The primary copies writes to the replica. Signs show the queue message, the replica and the three tables.</desc>
+<g class="d-node grass" style="--i:0"><rect x="10" y="300" width="80" height="60"/><text class="d-text" x="50" y="335" text-anchor="middle">Client</text></g>
+<path class="d-edge" style="--i:1" d="M90 330H110"/><path class="d-arrow" style="--i:1" d="M104 324L112 330L104 336Z"/><path class="d-arrow" style="--i:1" d="M96 324L88 330L96 336Z"/>
+<g class="d-node" style="--i:1"><rect x="110" y="60" width="90" height="540"/><text class="d-text" x="155" y="320" text-anchor="middle">API</text><text class="d-text" x="155" y="338" text-anchor="middle">gateway</text><text class="d-item" x="118" y="366">- one door</text><text class="d-item" x="118" y="386">- by path</text></g>
+<path class="d-edge alt" style="--i:2" d="M200 170H330"/><path class="d-arrow alt" style="--i:2" d="M324 164L332 170L324 176Z"/><path class="d-arrow alt" style="--i:2" d="M206 164L198 170L206 176Z"/><text class="d-label" style="--i:2" x="265" y="134" text-anchor="middle">GET</text><text class="d-label" style="--i:2" x="265" y="152" text-anchor="middle">/endpoints/{id}</text><text class="d-label" style="--i:2" x="265" y="196" text-anchor="middle">/deliveries</text>
+<g class="d-node cmd" style="--i:2"><rect x="330" y="123" width="170" height="94"/><text class="d-text" x="415" y="149" text-anchor="middle">History svc</text><text class="d-item" x="340" y="175">- check it is theirs</text><text class="d-item" x="340" y="195">- read one page</text><text class="d-item" x="340" y="215">- answer 200 + cursor</text></g>
+<path class="d-edge alt" style="--i:3" d="M500 185H600"/><path class="d-arrow alt" style="--i:3" d="M594 179L602 185L594 191Z"/><path class="d-arrow alt" style="--i:3" d="M506 179L498 185L506 191Z"/><text class="d-label" style="--i:3" x="550" y="173" text-anchor="middle">read page</text>
+<g class="d-node chest" style="--i:3"><rect x="600" y="155" width="150" height="60"/><text class="d-text" x="675" y="181" text-anchor="middle">Replica</text><text class="d-sub" x="675" y="203" text-anchor="middle">read-only copy</text></g>
+<path class="d-line" style="--i:3" d="M675 115V155"/>
+<g class="d-note" style="--i:3"><rect x="560" y="40" width="190" height="75"/><text class="d-note-t" x="572" y="60">replica</text><text class="d-mono" x="572" y="82">same three tables</text><text class="d-mono" x="572" y="100">read-only copy</text></g>
+<path class="d-edge" style="--i:4" d="M675 300V215"/><path class="d-arrow" style="--i:4" d="M669 223L675 215L681 223Z"/><text class="d-label" style="--i:4" x="667" y="262" text-anchor="end">copies writes</text>
+<path class="d-edge" style="--i:5" d="M200 377H330"/><path class="d-arrow" style="--i:5" d="M324 371L332 377L324 383Z"/><path class="d-arrow" style="--i:5" d="M206 371L198 377L206 383Z"/><text class="d-label" style="--i:5" x="265" y="355" text-anchor="middle">POST</text><text class="d-label" style="--i:5" x="265" y="403" text-anchor="middle">/endpoints</text>
+<g class="d-node cmd" style="--i:5"><rect x="330" y="330" width="170" height="94"/><text class="d-text" x="415" y="356" text-anchor="middle">Endpoint svc</text><text class="d-item" x="340" y="382">- https URLs only</text><text class="d-item" x="340" y="402">- make a secret</text><text class="d-item" x="340" y="422">- answer 201 Created</text></g>
+<path class="d-edge" style="--i:6" d="M500 377H600"/><path class="d-arrow" style="--i:6" d="M594 371L602 377L594 383Z"/><text class="d-label" style="--i:6" x="550" y="365" text-anchor="middle">save row</text>
+<path class="d-edge accent" style="--i:7" d="M200 517H330"/><path class="d-arrow accent" style="--i:7" d="M324 511L332 517L324 523Z"/><path class="d-arrow accent" style="--i:7" d="M206 511L198 517L206 523Z"/><text class="d-label" style="--i:7" x="265" y="495" text-anchor="middle">POST</text><text class="d-label" style="--i:7" x="265" y="541" text-anchor="middle">/events</text>
+<g class="d-node cmd" style="--i:7"><rect x="330" y="470" width="170" height="94"/><text class="d-text" x="415" y="496" text-anchor="middle">Event svc</text><text class="d-item" x="340" y="522">- save the event</text><text class="d-item" x="340" y="542">- one delivery per URL</text><text class="d-item" x="340" y="562">- queue them, say 202</text></g>
+<path class="d-edge accent" style="--i:8" d="M500 517H600"/><path class="d-arrow accent" style="--i:8" d="M594 511L602 517L594 523Z"/><text class="d-label" style="--i:8" x="550" y="505" text-anchor="middle">save rows</text>
+<path class="d-edge accent" style="--i:9" d="M415 564V640"/><path class="d-arrow accent" style="--i:9" d="M409 632L415 640L421 632Z"/><text class="d-label" style="--i:9" x="425" y="608">one job each</text>
+<g class="d-node furnace" style="--i:9"><rect x="330" y="640" width="170" height="70"/><text class="d-text" x="415" y="668" text-anchor="middle">Queue</text><text class="d-sub" x="415" y="690" text-anchor="middle">delivery jobs</text></g>
+<path class="d-line" style="--i:9" d="M250 675H330"/>
+<g class="d-note" style="--i:9"><rect x="60" y="627" width="190" height="95"/><text class="d-note-t" x="72" y="647">queue message</text><text class="d-mono" x="72" y="669">job = delivery_id</text><text class="d-mono" x="72" y="687">one per URL</text><text class="d-mono" x="72" y="705">at-least-once</text></g>
+<path class="d-edge accent" style="--i:10" d="M375 710V770"/><path class="d-arrow accent" style="--i:10" d="M369 762L375 770L381 762Z"/><text class="d-label" style="--i:10" x="367" y="745" text-anchor="end">next job</text>
+<path class="d-edge" style="--i:11" d="M455 770V710"/><path class="d-arrow" style="--i:11" d="M449 718L455 710L461 718Z"/><text class="d-label" style="--i:11" x="463" y="745">due rows</text>
+<g class="d-node furnace" style="--i:10"><rect x="330" y="770" width="170" height="134"/><text class="d-text" x="415" y="796" text-anchor="middle">Worker</text><text class="d-item" x="340" y="822">- sign body with secret</text><text class="d-item" x="340" y="842">- POST to subscriber</text><text class="d-item" x="340" y="862">- 2xx: mark sent</text><text class="d-item" x="340" y="882">- else: set next try</text><text class="d-item" x="340" y="902">- 30s sweep: re-queue</text></g>
+<path class="d-edge accent" style="--i:12" d="M330 837H200"/><path class="d-arrow accent" style="--i:12" d="M206 831L198 837L206 843Z"/><path class="d-arrow accent" style="--i:12" d="M324 831L332 837L324 843Z"/><text class="d-label" style="--i:12" x="265" y="825" text-anchor="middle">POST event</text><text class="d-label" style="--i:12" x="265" y="861" text-anchor="middle">2xx or fail</text>
+<g class="d-node" style="--i:12"><rect x="20" y="800" width="180" height="74"/><text class="d-text" x="110" y="826" text-anchor="middle">Subscriber</text><text class="d-item" x="30" y="852">- their https URL</text><text class="d-item" x="30" y="872">- 2xx means got it</text></g>
+<path class="d-edge accent" style="--i:13" d="M500 837H600"/><path class="d-arrow accent" style="--i:13" d="M594 831L602 837L594 843Z"/><path class="d-arrow accent" style="--i:13" d="M506 831L498 837L506 843Z"/><text class="d-label" style="--i:13" x="550" y="825" text-anchor="middle">log result</text>
+<g class="d-node chest" style="--i:6"><rect x="600" y="300" width="150" height="600"/><text class="d-text" x="675" y="330" text-anchor="middle">Primary DB</text><text class="d-sub" x="675" y="352" text-anchor="middle">all main data</text></g>
+<path class="d-line" style="--i:6" d="M675 900V925"/>
+<g class="d-note" style="--i:6"><rect x="500" y="925" width="250" height="250"/><text class="d-note-t" x="512" y="945">database tables</text><text class="d-mono" x="512" y="967">endpoints  endpoint_id  PK</text><text class="d-mono" x="512" y="985">  owner_id, event_type</text><text class="d-mono" x="512" y="1003">  url, secret</text><text class="d-mono" x="512" y="1021">  index owner_id+event_type</text><text class="d-mono" x="512" y="1039">events  event_id  PK</text><text class="d-mono" x="512" y="1057">  owner_id, type, body</text><text class="d-mono" x="512" y="1075">deliveries  delivery_id  PK</text><text class="d-mono" x="512" y="1093">  event_id, endpoint_id</text><text class="d-mono" x="512" y="1111">  status, attempts, last_code</text><text class="d-mono" x="512" y="1129">  created_at, next_attempt_at</text><text class="d-mono" x="512" y="1147">  index status+next_attempt_at</text><text class="d-mono" x="512" y="1165">  index endpoint_id+created_at</text></g>
+<rect class="d-packet" x="-6" y="-6" width="12" height="12" opacity="0"><animateMotion dur="8s" begin="1.6s" repeatCount="indefinite" keyPoints="0;1;1" keyTimes="0;.5;1" calcMode="linear" path="M90 330H155V517H415V675H375V837H200"/><animate attributeName="opacity" dur="8s" begin="1.6s" repeatCount="indefinite" values="0;1;1;0;0" keyTimes="0;.02;.48;.5;1"/></rect>
+<rect class="d-packet alt" x="-6" y="-6" width="12" height="12" opacity="0"><animateMotion dur="8s" begin="1.6s" repeatCount="indefinite" keyPoints="0;0;1;1" keyTimes="0;.5;.9;1" calcMode="linear" path="M90 330H155V170H415V185H600"/><animate attributeName="opacity" dur="8s" begin="1.6s" repeatCount="indefinite" values="0;0;1;1;0;0" keyTimes="0;.5;.51;.89;.9;1"/></rect>
+              </svg>
+            </div>
+            <figcaption>The complete system. Gold = an event: saved by the Event service, queued, then delivered by the Worker. Cyan = a customer reading history from the replica. The primary copies writes to the replica. Events and delivering are separate from history because writes and slow outside calls must not compete with reads.</figcaption>
+            <button class="replay" type="button" aria-label="Replay diagram animation">Replay</button>
+          </figure>
+
+          <div class="next reveal">
+            <h4>What you could add next</h4>
+            <ul class="next-list">
+              <li>A "replay" button that sends a failed event again.</li>
+              <li>Pause an endpoint that has failed for days.</li>
+              <li>Rotate secrets safely.</li>
+            </ul>
+          </div>
+        </section>
+
+        <section class="sec reveal" id="2026-11-26-webhook-delivery-sec-tips">
+          <h3>Interview tips</h3>
+          <dl class="qa">
+            <div><dt>What if a customer is down for a day?</dt><dd>Backoff runs out and the delivery shows as failed in the history.</dd></div>
+            <div><dt>Can you guarantee exactly once?</dt><dd>No. It is at-least-once; the event id lets receivers ignore repeats.</dd></div>
+            <div><dt>How do you stop a URL that points at our own network?</dt><dd>Require https and reject private addresses when saving and before each call.</dd></div>
+          </dl>
+          <h4>Common mistakes</h4>
+          <ul class="mistakes">
+            <li>Calling subscribers inside the request that created the event.</li>
+            <li>Retrying instantly and forever, or never signing the body.</li>
+          </ul>
+          <aside class="callout tip">
+            <span class="callout-label">Interview tip</span>
+            <p>Say "at-least-once, so receivers de-duplicate". It shows you know retries cause repeats.</p>
+          </aside>
+          <aside class="callout confidence">
+            <span class="callout-label">Confidence note</span>
+            <p>The traffic numbers and the retry schedule are assumptions; real providers pick their own. A delay queue is another valid way to retry.</p>
+          </aside>
+        </section>
+
+        <p class="sources">Sources: <a href="https://docs.stripe.com/webhooks">Stripe documentation on webhooks</a>; <a href="https://docs.github.com/en/webhooks/using-webhooks/best-practices-for-using-webhooks">GitHub documentation, best practices for webhooks</a>; <a href="https://www.hellointerview.com/learn/system-design/in-a-hurry/delivery">Hello Interview, delivery framework</a>. This is a common approach, not a claim about any company's internals.</p>
+      </div>
+    </article>
     <article class="entry" id="2026-11-25-delivery-tracking" data-topic="Delivery tracking" data-domain="Geo &amp; location" data-date="2026-11-25" data-level="2">
       <header class="entry-head">
         <div class="entry-meta">
