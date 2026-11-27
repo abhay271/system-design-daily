@@ -420,6 +420,7 @@ dfn.term{font-style:normal;border-bottom:2px dotted var(--accent);cursor:help}
       <h2><svg viewBox="0 0 12 12" aria-hidden="true"><path fill="#7A4A2A" d="M0 2h12v9H0z"/><path fill="#A86A3C" d="M1 3h10v3H1zM1 7h10v3H1z"/><path fill="#E9B526" d="M5 5h2v3H5z"/><path fill="#4A2C18" d="M0 6h5v1H0zM7 6h5v1H7z"/></svg>Archive</h2>
       <ol class="toc">
         <!-- TOC -->
+        <li><a href="#2026-11-27-live-scores"><time datetime="2026-11-27">2026-11-27</time><span>Live scores: push over one-way streams, number every update</span></a></li>
         <li><a href="#2026-11-26-webhook-delivery"><time datetime="2026-11-26">2026-11-26</time><span>Webhook delivery: queue the sends, retry with growing waits</span></a></li>
         <li><a href="#2026-11-25-delivery-tracking"><time datetime="2026-11-25">2026-11-25</time><span>Delivery tracking: keep only the latest point in memory</span></a></li>
         <li><a href="#2026-11-24-trending-topics"><time datetime="2026-11-24">2026-11-24</time><span>Trending topics: count in batches, serve a ready list</span></a></li>
@@ -458,6 +459,263 @@ dfn.term{font-style:normal;border-bottom:2px dotted var(--accent);cursor:help}
 
   <main id="entries" tabindex="-1">
     <!-- ENTRIES -->
+    <article class="entry" id="2026-11-27-live-scores" data-topic="Live scores" data-domain="Real-time messaging" data-date="2026-11-27" data-level="2">
+      <header class="entry-head">
+        <div class="entry-meta">
+          <span class="chip">Real-time messaging</span>
+          <span class="level" title="Difficulty: level 2 of 3">Lv 2</span>
+          <time datetime="2026-11-27">27 Nov 2026</time>
+          <span class="read"><span class="read-time">4</span> min read</span>
+        </div>
+        <h2 class="entry-title">Design a live sports scores service</h2>
+        <p class="lede">A goal is scored, and a million phones show it two seconds later, with nobody pulling to refresh. The data is tiny, but the whole audience arrives at once.</p>
+        <nav class="steps" aria-label="Sections of this design">
+          <a href="#2026-11-27-live-scores-sec-functional">Features</a>
+          <a href="#2026-11-27-live-scores-sec-nonfunctional">Qualities</a>
+          <a href="#2026-11-27-live-scores-sec-entities">Entities</a>
+          <a href="#2026-11-27-live-scores-sec-api">API</a>
+          <a href="#2026-11-27-live-scores-sec-hld">Design</a>
+          <a href="#2026-11-27-live-scores-sec-deepdives">Deep dives</a>
+          <a href="#2026-11-27-live-scores-sec-tips">Tips</a>
+        </nav>
+      </header>
+
+      <div class="prose">
+        <details class="legend">
+          <summary>Legend <span class="hint">7 terms used below</span></summary>
+          <dl>
+            <div><dt>Polling</dt><dd>The client asks the server again and again: "anything new?". Most answers are "no".</dd></div>
+            <div><dt>Server-Sent Events</dt><dd>The server keeps one web response open and writes a line each time something happens. Data flows one way, server to client.</dd></div>
+            <div><dt>Pub/sub</dt><dd>A message board with named topics. Anyone can publish to a topic, and everyone subscribed gets the message.</dd></div>
+            <div><dt>Sequence number</dt><dd>A counter that numbers the updates of one match: 1, 2, 3. It tells us the order and what is missing.</dd></div>
+            <div><dt>Cache</dt><dd>A small, fast store that keeps recent answers so the database is asked less often.</dd></div>
+            <div><dt>API gateway</dt><dd>The single front door that sends each request to the right service.</dd></div>
+            <div><dt>Replica</dt><dd>A live copy of a database. It serves reads and takes over if the main one fails.</dd></div>
+          </dl>
+        </details>
+
+        <section class="sec reveal" id="2026-11-27-live-scores-sec-functional">
+          <h3>Functional requirements</h3>
+          <ul class="reqs">
+            <li>See today's matches, each with its current score.</li>
+            <li>Open one match and see its score and recent events (goals, cards).</li>
+            <li>See new events appear without refreshing.</li>
+          </ul>
+          <p class="out">Out of scope: betting, video, commentary text, player stats, accounts.</p>
+        </section>
+
+        <section class="sec reveal" id="2026-11-27-live-scores-sec-nonfunctional">
+          <h3>Non-functional requirements</h3>
+          <ul class="reqs nfr">
+            <li><strong>Fast updates.</strong> A goal should show within about 2 seconds, or a friend's text spoils it.</li>
+            <li><strong>Huge audiences.</strong> A final can have a million viewers on one match while others have a few.</li>
+            <li><strong>Right order.</strong> The score must never go backwards or skip a goal, even after a dropped connection.</li>
+          </ul>
+        </section>
+
+        <section class="sec reveal" id="2026-11-27-live-scores-sec-entities">
+          <h3>Core entities</h3>
+          <ul class="entities">
+            <li><strong>Match:</strong> two teams, a start time, a status and the latest score.</li>
+            <li><strong>Update:</strong> one event in a match, such as a goal, with its order number and the score after it.</li>
+          </ul>
+        </section>
+
+        <section class="sec reveal" id="2026-11-27-live-scores-sec-api">
+          <h3>API design</h3>
+          <div class="api-list">
+            <div class="api">
+              <div class="api-sig"><span class="method get">GET</span><code>/matches?date=2026-11-27&amp;cursor=...</code></div>
+              <p>One page of matches for a day.</p>
+              <div class="io">
+                <div><span class="io-l">Request body</span><pre>(none)</pre></div>
+                <div><span class="io-l">Response 200 OK</span><pre>{ "items": [ { "match_id": "42",
+    "home": "A", "away": "B",
+    "score": "1-0", "status": "live" } ],
+  "next_cursor": "..." }</pre></div>
+              </div>
+            </div>
+            <div class="api">
+              <div class="api-sig"><span class="method get">GET</span><code>/matches/{id}</code></div>
+              <p>A snapshot: the score, the latest sequence number and recent events. 404 if the match does not exist.</p>
+              <div class="io">
+                <div><span class="io-l">Request body</span><pre>(none)</pre></div>
+                <div><span class="io-l">Response 200 OK</span><pre>{ "match_id": "42", "score": "1-0",
+  "last_seq": 12,
+  "events": [ { "seq": 12, "kind": "goal" } ] }</pre></div>
+              </div>
+            </div>
+            <div class="api">
+              <div class="api-sig"><span class="method get">GET</span><code>/matches/{id}/stream</code></div>
+              <p>Stays open and pushes each new event. A reconnecting browser sends the last id it saw.</p>
+              <div class="io">
+                <div><span class="io-l">Request header</span><pre>Last-Event-2026-11-27-live-scores: 12</pre></div>
+                <div><span class="io-l">Response 200 OK (text/event-stream)</span><pre>id: 13
+data: { "kind": "goal", "score": "2-0" }</pre></div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="sec" id="2026-11-27-live-scores-sec-hld">
+          <h3>High-level design</h3>
+          <div class="reveal">
+            <p>One data provider sends us every event (an assumption). Servers are identical, keep no data, and sit behind a load balancer.</p>
+            <h4>1. List matches</h4>
+            <p>Read the matches of one date through an index on start time, one page at a time.</p>
+            <h4>2. Show one match</h4>
+            <p>Read the match row, which holds the latest score, plus its newest update rows.</p>
+            <h4>3. Show new events</h4>
+            <p>The provider sends each event to an app server, which saves an update row and refreshes the match row. Simplest is <dfn class="term" title="The client asks the server again and again: anything new? Most answers are no.">polling</dfn>: each phone asks every 2 seconds. A million viewers means 500,000 reads a second on one database.</p>
+            <div class="table-scroll">
+              <table class="schema">
+                <caption>Tables: matches and updates</caption>
+                <thead><tr><th>Column</th><th>Type</th><th>Note</th></tr></thead>
+                <tbody>
+                  <tr><td>matches.match_id</td><td>bigint</td><td>primary key; index on start_time lists a day</td></tr>
+                  <tr><td>matches.home, away, status, score</td><td>text</td><td>status is scheduled, live or finished</td></tr>
+                  <tr><td>matches.last_seq</td><td>int</td><td>number of the newest update</td></tr>
+                  <tr><td>updates.match_id, seq</td><td>bigint, int</td><td>primary key together, so one match's updates sit side by side</td></tr>
+                  <tr><td>updates.kind, minute, score_after</td><td>text, int, text</td><td>what happened and the score after it</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <figure class="diagram-fig">
+            <div class="diagram-scroll" tabindex="0" role="group" aria-label="Diagram: simple live scores with polling. Scrollable on small screens.">
+              <svg class="diagram" viewBox="0 0 760 340" role="img" aria-labelledby="2026-11-27-live-scores-d1-t 2026-11-27-live-scores-d1-d">
+                <title id="2026-11-27-live-scores-d1-t">Simple live scores with polling</title>
+                <desc id="2026-11-27-live-scores-d1-d">The score feed sends each new score to the app servers, which save it in the database. The client asks the app servers every 2 seconds for the latest score, and the app servers read it from the database. A sign shows the two tables.</desc>
+<g class="d-node" style="--i:0"><rect x="10" y="50" width="150" height="94"/><text class="d-text" x="85" y="76" text-anchor="middle">Score feed</text><text class="d-item" x="20" y="102">- outside provider</text><text class="d-item" x="20" y="122">- sends each event</text></g>
+<path class="d-edge accent" style="--i:1" d="M160 97H260"/><path class="d-arrow accent" style="--i:1" d="M254 91L262 97L254 103Z"/><text class="d-label" style="--i:1" x="210" y="85" text-anchor="middle">new score</text>
+<g class="d-node cmd" style="--i:2"><rect x="260" y="50" width="180" height="94"/><text class="d-text" x="350" y="76" text-anchor="middle">App servers</text><text class="d-item" x="272" y="102">- save each update</text><text class="d-item" x="272" y="122">- answer "latest score"</text><text class="d-item" x="272" y="142">- one read per ask</text></g>
+<path class="d-edge accent" style="--i:3" d="M440 97H560"/><path class="d-arrow accent" style="--i:3" d="M554 91L562 97L554 103Z"/><path class="d-arrow accent" style="--i:3" d="M446 91L438 97L446 103Z"/><text class="d-label" style="--i:3" x="500" y="85" text-anchor="middle">save / read</text>
+<g class="d-node chest" style="--i:3"><rect x="560" y="50" width="190" height="94"/><text class="d-text" x="655" y="82" text-anchor="middle">Database</text><text class="d-sub" x="655" y="104" text-anchor="middle">matches, updates</text></g>
+<path class="d-line" style="--i:3" d="M655 144V170"/>
+<g class="d-note" style="--i:3"><rect x="560" y="170" width="190" height="90"/><text class="d-note-t" x="572" y="190">database tables</text><text class="d-mono" x="572" y="212">matches  match_id  PK</text><text class="d-mono" x="572" y="232">updates  match_id+seq PK</text></g>
+<g class="d-node grass" style="--i:4"><rect x="10" y="260" width="80" height="60"/><text class="d-text" x="50" y="295" text-anchor="middle">Client</text></g>
+<path class="d-edge alt" style="--i:4" d="M90 290H350V144"/><path class="d-arrow alt" style="--i:4" d="M344 152L350 144L356 152Z"/><path class="d-arrow alt" style="--i:4" d="M98 284L90 290L98 296Z"/><text class="d-label" style="--i:4" x="220" y="278" text-anchor="middle">ask every 2s</text>
+<rect class="d-packet" x="-6" y="-6" width="12" height="12" opacity="0"><animateMotion dur="8s" begin="1.4s" repeatCount="indefinite" keyPoints="0;1;1" keyTimes="0;.4;1" calcMode="linear" path="M160 97H560"/><animate attributeName="opacity" dur="8s" begin="1.4s" repeatCount="indefinite" values="0;1;1;0;0" keyTimes="0;.02;.38;.4;1"/></rect>
+<rect class="d-packet alt" x="-6" y="-6" width="12" height="12" opacity="0"><animateMotion dur="8s" begin="1.4s" repeatCount="indefinite" keyPoints="0;0;1;1" keyTimes="0;.4;.8;1" calcMode="linear" path="M90 290H350V97H560"/><animate attributeName="opacity" dur="8s" begin="1.4s" repeatCount="indefinite" values="0;0;1;1;0;0" keyTimes="0;.4;.41;.79;.8;1"/></rect>
+              </svg>
+            </div>
+            <figcaption>The starting point. Gold = a new score saved, cyan = a viewer asking. It works, but every viewer hits the database, and news arrives up to 2 seconds late.</figcaption>
+            <button class="replay" type="button" aria-label="Replay diagram animation">Replay</button>
+          </figure>
+
+          <aside class="callout why reveal">
+            <span class="callout-label">Why</span>
+            <p><strong>Why keep every update, not just the score?</strong> A numbered log lets a phone ask for exactly what it missed. The latest score is only the newest row.</p>
+          </aside>
+        </section>
+
+        <section class="sec" id="2026-11-27-live-scores-sec-deepdives">
+          <h3>Deep dives</h3>
+          <div class="dive reveal">
+            <h4>How do we reach a million viewers within seconds?</h4>
+            <p>Polling is wasteful and always a little late.</p>
+            <ol class="options">
+              <li><strong>Poll every 2 seconds.</strong> Simple, but millions of reads that mostly say "nothing new".</li>
+              <li><strong>WebSocket.</strong> Instant, but two-way and heavier than needed, since viewers never send anything.</li>
+              <li class="pick"><strong>Server-Sent Events.</strong><span class="pick-tag">Pick</span> One-way push over plain HTTP; browsers reconnect themselves.</li>
+            </ol>
+            <p>With <dfn class="term" title="The server keeps one web response open and writes a line each time something happens. Data flows one way, server to client.">Server-Sent Events</dfn> (SSE), a stream service keeps each phone's connection open. But a goal arrives at the ingest service, not at the server holding your phone. So ingest publishes it to a <dfn class="term" title="A message board with named topics. Anyone can publish to a topic, and everyone subscribed gets the message.">pub/sub</dfn> topic named after the match, and each stream service subscribes to the matches its viewers watch. Assume 50,000 connections per server: a million viewers need about 20 servers, so a goal is 20 messages, not a million.</p>
+          </div>
+
+          <div class="dive reveal">
+            <h4>How do we keep the order right after a dropped connection?</h4>
+            <p>Phones lose signal, and pub/sub keeps no messages for absent listeners.</p>
+            <ol class="options">
+              <li><strong>Send only the new score.</strong> Tiny, but a missed message leaves a wrong score until the next goal.</li>
+              <li><strong>Send the whole match every time.</strong> Self-correcting, but heavy, and it can still arrive out of order.</li>
+              <li class="pick"><strong>Number every update.</strong><span class="pick-tag">Pick</span> The phone can spot a gap and ask for exactly what it missed.</li>
+            </ol>
+            <p>Ingest gives each update the next <dfn class="term" title="A counter that numbers the updates of one match: 1, 2, 3. It tells us the order and what is missing.">sequence number</dfn> (last_seq + 1) inside one database transaction, and the key (match_id, seq) rejects duplicates. Each pushed event carries its number as the SSE id; the screen ignores anything not newer. On reconnect the browser sends Last-Event-2026-11-27-live-scores, and the stream service first replays the later rows from the replica. If pub/sub is down, stream services poll the replica every 2 seconds instead.</p>
+          </div>
+
+          <div class="reveal">
+            <h4>Final design</h4>
+            <p>The dives added SSE, pub/sub and numbered updates. Three services split the work: ingest is a trickle of writes, match pages are a flood of cheap reads, and streams are long-lived connections. Each scales alone. An <dfn class="term" title="The single front door that sends each request to the right service.">API gateway</dfn> routes viewers by path, and the feed talks to ingest directly. Match pages come from a <dfn class="term" title="A small, fast store that keeps recent answers so the database is asked less often.">cache</dfn> first, so a million kickoff page loads cost about one read a second per match. The <dfn class="term" title="A live copy of a database. It serves reads and takes over if the main one fails.">replica</dfn> takes over if the primary fails, and serves reads if the cache is down. A score one second old is fine, but numbering always happens on the primary.</p>
+          </div>
+
+          <figure class="diagram-fig" id="2026-11-27-live-scores-final">
+            <div class="diagram-scroll" tabindex="0" role="group" aria-label="Diagram: the final live scores design. Scrollable on small screens.">
+              <svg class="diagram" viewBox="0 0 760 1010" role="img" aria-labelledby="2026-11-27-live-scores-d2-t 2026-11-27-live-scores-d2-d">
+                <title id="2026-11-27-live-scores-d2-t">Final live scores design</title>
+                <desc id="2026-11-27-live-scores-d2-d">The client talks to an API gateway. GET /matches and GET /matches/{id} go to the Match service, which checks the cache first and reads the replica on a miss. GET /matches/{id}/stream goes to the Stream service, which keeps the connection open, listens to the pub/sub topic for new updates and reads missed updates from the replica. The score feed sends updates to the Ingest service, which numbers each update, saves it in the primary database and publishes it to pub/sub. The primary copies writes to the replica. Signs show the cache, the replica, the pub/sub topic and the two tables.</desc>
+<g class="d-node grass" style="--i:0"><rect x="10" y="300" width="80" height="60"/><text class="d-text" x="50" y="335" text-anchor="middle">Client</text></g>
+<path class="d-edge" style="--i:1" d="M90 330H110"/><path class="d-arrow" style="--i:1" d="M104 324L112 330L104 336Z"/><path class="d-arrow" style="--i:1" d="M96 324L88 330L96 336Z"/>
+<g class="d-node" style="--i:1"><rect x="110" y="60" width="90" height="540"/><text class="d-text" x="155" y="320" text-anchor="middle">API</text><text class="d-text" x="155" y="338" text-anchor="middle">gateway</text><text class="d-item" x="118" y="366">- one door</text><text class="d-item" x="118" y="386">- by path</text></g>
+<path class="d-edge alt" style="--i:2" d="M200 170H330"/><path class="d-arrow alt" style="--i:2" d="M324 164L332 170L324 176Z"/><path class="d-arrow alt" style="--i:2" d="M206 164L198 170L206 176Z"/><text class="d-label" style="--i:2" x="265" y="134" text-anchor="middle">GET /matches</text><text class="d-label" style="--i:2" x="265" y="152" text-anchor="middle">GET /matches/{id}</text>
+<g class="d-node cmd" style="--i:2"><rect x="330" y="110" width="180" height="94"/><text class="d-text" x="420" y="136" text-anchor="middle">Match svc</text><text class="d-item" x="340" y="162">- list or one match</text><text class="d-item" x="340" y="182">- cache, then replica</text><text class="d-item" x="340" y="202">- answer 200 or 404</text></g>
+<path class="d-edge alt" style="--i:3" d="M510 140H600"/><path class="d-arrow alt" style="--i:3" d="M594 134L602 140L594 146Z"/><path class="d-arrow alt" style="--i:3" d="M516 134L508 140L516 146Z"/><text class="d-label" style="--i:3" x="555" y="128" text-anchor="middle">check first</text>
+<g class="d-node gem" style="--i:3"><rect x="600" y="110" width="150" height="60"/><text class="d-text" x="675" y="136" text-anchor="middle">Cache</text><text class="d-sub" x="675" y="158" text-anchor="middle">match pages</text></g>
+<path class="d-line" style="--i:3" d="M675 90V110"/>
+<g class="d-note" style="--i:3"><rect x="560" y="10" width="190" height="80"/><text class="d-note-t" x="572" y="30">page cache</text><text class="d-mono" x="572" y="52">match:{id} -> JSON</text><text class="d-mono" x="572" y="70">TTL 1 second</text></g>
+<path class="d-edge alt" style="--i:4" d="M510 190H600"/><path class="d-arrow alt" style="--i:4" d="M594 184L602 190L594 196Z"/><path class="d-arrow alt" style="--i:4" d="M516 184L508 190L516 196Z"/><text class="d-label" style="--i:4" x="555" y="208" text-anchor="middle">on miss</text>
+<g class="d-node chest" style="--i:4"><rect x="600" y="180" width="150" height="240"/><text class="d-text" x="675" y="290" text-anchor="middle">Replica</text><text class="d-sub" x="675" y="312" text-anchor="middle">read-only copy</text></g>
+<path class="d-line" style="--i:4" d="M510 262H600"/>
+<g class="d-note" style="--i:4"><rect x="330" y="226" width="180" height="72"/><text class="d-note-t" x="342" y="246">replica</text><text class="d-mono" x="342" y="268">same two tables</text><text class="d-mono" x="342" y="286">read-only copy</text></g>
+<path class="d-edge" style="--i:5" d="M735 620V420"/><path class="d-arrow" style="--i:5" d="M729 428L735 420L741 428Z"/><text class="d-label" style="--i:5" x="727" y="596" text-anchor="end">copies writes</text>
+<path class="d-edge accent" style="--i:6" d="M200 365H330"/><path class="d-arrow accent" style="--i:6" d="M324 359L332 365L324 371Z"/><path class="d-arrow accent" style="--i:6" d="M206 359L198 365L206 371Z"/><text class="d-label" style="--i:6" x="265" y="331" text-anchor="middle">GET</text><text class="d-label" style="--i:6" x="265" y="347" text-anchor="middle">/matches/{id}</text><text class="d-label" style="--i:6" x="265" y="389" text-anchor="middle">/stream</text>
+<g class="d-node cmd" style="--i:6"><rect x="330" y="310" width="180" height="94"/><text class="d-text" x="420" y="336" text-anchor="middle">Stream svc</text><text class="d-item" x="340" y="362">- keep SSE open</text><text class="d-item" x="340" y="382">- snapshot, then pushes</text><text class="d-item" x="340" y="402">- resend missed ones</text></g>
+<path class="d-edge alt" style="--i:7" d="M510 330H600"/><path class="d-arrow alt" style="--i:7" d="M594 324L602 330L594 336Z"/><path class="d-arrow alt" style="--i:7" d="M516 324L508 330L516 336Z"/><text class="d-label" style="--i:7" x="555" y="318" text-anchor="middle">missed ones</text>
+<path class="d-edge accent" style="--i:8" d="M420 404V480"/><path class="d-arrow accent" style="--i:8" d="M414 412L420 404L426 412Z"/><path class="d-arrow accent" style="--i:8" d="M414 472L420 480L426 472Z"/><text class="d-label" style="--i:8" x="430" y="447">match updates</text>
+<g class="d-node furnace" style="--i:8"><rect x="330" y="480" width="180" height="70"/><text class="d-text" x="420" y="508" text-anchor="middle">Pub/sub</text><text class="d-sub" x="420" y="530" text-anchor="middle">one topic per match</text></g>
+<path class="d-line" style="--i:8" d="M510 515H530"/>
+<g class="d-note" style="--i:8"><rect x="530" y="470" width="185" height="80"/><text class="d-note-t" x="542" y="490">pub/sub topic</text><text class="d-mono" x="542" y="512">topic = match id</text><text class="d-mono" x="542" y="530">msg: seq + score</text></g>
+<path class="d-edge accent" style="--i:9" d="M420 640V550"/><path class="d-arrow accent" style="--i:9" d="M414 558L420 550L426 558Z"/><text class="d-label" style="--i:9" x="430" y="600">publish</text>
+<g class="d-node" style="--i:9"><rect x="20" y="660" width="180" height="74"/><text class="d-text" x="110" y="686" text-anchor="middle">Score feed</text><text class="d-item" x="30" y="712">- outside provider</text><text class="d-item" x="30" y="732">- sends each event</text></g>
+<path class="d-edge accent" style="--i:10" d="M200 697H330"/><path class="d-arrow accent" style="--i:10" d="M324 691L332 697L324 703Z"/><text class="d-label" style="--i:10" x="265" y="685" text-anchor="middle">new event</text>
+<g class="d-node cmd" style="--i:10"><rect x="330" y="640" width="180" height="114"/><text class="d-text" x="420" y="666" text-anchor="middle">Ingest svc</text><text class="d-item" x="340" y="692">- check the feed key</text><text class="d-item" x="340" y="712">- next seq per match</text><text class="d-item" x="340" y="732">- save update row</text><text class="d-item" x="340" y="752">- publish the update</text></g>
+<path class="d-edge accent" style="--i:11" d="M510 697H600"/><path class="d-arrow accent" style="--i:11" d="M594 691L602 697L594 703Z"/><text class="d-label" style="--i:11" x="555" y="685" text-anchor="middle">save row</text>
+<g class="d-node chest" style="--i:5"><rect x="600" y="620" width="150" height="160"/><text class="d-text" x="675" y="696" text-anchor="middle">Primary DB</text><text class="d-sub" x="675" y="718" text-anchor="middle">all main data</text></g>
+<path class="d-line" style="--i:5" d="M675 780V800"/>
+<g class="d-note" style="--i:5"><rect x="500" y="800" width="250" height="190"/><text class="d-note-t" x="512" y="820">database tables</text><text class="d-mono" x="512" y="842">matches  match_id  PK</text><text class="d-mono" x="512" y="860">  home, away, status</text><text class="d-mono" x="512" y="878">  score, last_seq</text><text class="d-mono" x="512" y="896">  index start_time</text><text class="d-mono" x="512" y="914">updates  match_id+seq  PK</text><text class="d-mono" x="512" y="932">  kind, minute</text><text class="d-mono" x="512" y="950">  score_after</text><text class="d-mono" x="512" y="968">  seq = last_seq + 1</text></g>
+<rect class="d-packet" x="-6" y="-6" width="12" height="12" opacity="0"><animateMotion dur="8s" begin="1.6s" repeatCount="indefinite" keyPoints="0;1;1" keyTimes="0;.5;1" calcMode="linear" path="M200 697H420V365H155V330H90"/><animate attributeName="opacity" dur="8s" begin="1.6s" repeatCount="indefinite" values="0;1;1;0;0" keyTimes="0;.02;.48;.5;1"/></rect>
+<rect class="d-packet alt" x="-6" y="-6" width="12" height="12" opacity="0"><animateMotion dur="8s" begin="1.6s" repeatCount="indefinite" keyPoints="0;0;1;1" keyTimes="0;.5;.9;1" calcMode="linear" path="M90 330H155V170H420V140H600"/><animate attributeName="opacity" dur="8s" begin="1.6s" repeatCount="indefinite" values="0;0;1;1;0;0" keyTimes="0;.5;.51;.89;.9;1"/></rect>
+              </svg>
+            </div>
+            <figcaption>The complete system. Gold = a goal: sent by the feed to Ingest, numbered and saved, published, then pushed down a viewer's open stream. Cyan = a viewer opening a match, answered from the cache. The primary copies writes to the replica. Ingest, match pages and streams are separate because a few writes, cheap reads and open connections each need a different amount of room.</figcaption>
+            <button class="replay" type="button" aria-label="Replay diagram animation">Replay</button>
+          </figure>
+
+          <div class="next reveal">
+            <h4>What you could add next</h4>
+            <ul class="next-list">
+              <li>A second data provider as a backup feed.</li>
+              <li>A CDN for snapshots of the biggest games.</li>
+              <li>Push notifications for goals in followed teams.</li>
+            </ul>
+          </div>
+        </section>
+
+        <section class="sec reveal" id="2026-11-27-live-scores-sec-tips">
+          <h3>Interview tips</h3>
+          <dl class="qa">
+            <div><dt>Why not WebSocket?</dt><dd>Viewers only receive, so one-way SSE is simpler. WebSocket fits if viewers also send, such as chat.</dd></div>
+            <div><dt>What if a stream server dies?</dt><dd>Its phones reconnect to another one and replay everything after their last id.</dd></div>
+            <div><dt>A million people open the page at kickoff?</dt><dd>The one-second cache keeps it to about one database read a second per match.</dd></div>
+          </dl>
+          <h4>Common mistakes</h4>
+          <ul class="mistakes">
+            <li>Letting every viewer poll the database.</li>
+            <li>Forgetting order numbers, so a reconnect shows a stale or wrong score.</li>
+          </ul>
+          <aside class="callout tip">
+            <span class="callout-label">Interview tip</span>
+            <p>Say it out loud: one writer, millions of readers. That justifies pub/sub, caching and SSE.</p>
+          </aside>
+          <aside class="callout confidence">
+            <span class="callout-label">Confidence note</span>
+            <p>The 2-second goal and 50,000 connections per server are assumptions. WebSocket or long polling are also valid.</p>
+          </aside>
+        </section>
+
+        <p class="sources">Sources: <a href="https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events/Using_server-sent_events">MDN, Using server-sent events</a>; <a href="https://redis.io/docs/latest/develop/interact/pubsub/">Redis documentation on pub/sub</a>; <a href="https://www.hellointerview.com/learn/system-design/in-a-hurry/delivery">Hello Interview, delivery framework</a>. This is a common approach, not a claim about any company's internals.</p>
+      </div>
+    </article>
     <article class="entry" id="2026-11-26-webhook-delivery" data-topic="Webhook delivery" data-domain="Queues &amp; async jobs" data-date="2026-11-26" data-level="2">
       <header class="entry-head">
         <div class="entry-meta">
