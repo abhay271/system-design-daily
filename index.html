@@ -420,6 +420,7 @@ dfn.term{font-style:normal;border-bottom:2px dotted var(--accent);cursor:help}
       <h2><svg viewBox="0 0 12 12" aria-hidden="true"><path fill="#7A4A2A" d="M0 2h12v9H0z"/><path fill="#A86A3C" d="M1 3h10v3H1zM1 7h10v3H1z"/><path fill="#E9B526" d="M5 5h2v3H5z"/><path fill="#4A2C18" d="M0 6h5v1H0zM7 6h5v1H7z"/></svg>Archive</h2>
       <ol class="toc">
         <!-- TOC -->
+        <li><a href="#2026-11-28-reviews-ratings"><time datetime="2026-11-28">2026-11-28</time><span>Reviews and ratings: cache the page, keep a running sum</span></a></li>
         <li><a href="#2026-11-27-live-scores"><time datetime="2026-11-27">2026-11-27</time><span>Live scores: push over one-way streams, number every update</span></a></li>
         <li><a href="#2026-11-26-webhook-delivery"><time datetime="2026-11-26">2026-11-26</time><span>Webhook delivery: queue the sends, retry with growing waits</span></a></li>
         <li><a href="#2026-11-25-delivery-tracking"><time datetime="2026-11-25">2026-11-25</time><span>Delivery tracking: keep only the latest point in memory</span></a></li>
@@ -459,6 +460,250 @@ dfn.term{font-style:normal;border-bottom:2px dotted var(--accent);cursor:help}
 
   <main id="entries" tabindex="-1">
     <!-- ENTRIES -->
+    <article class="entry" id="2026-11-28-reviews-ratings" data-topic="Reviews and ratings" data-domain="Read-heavy lookup" data-date="2026-11-28" data-level="2">
+      <header class="entry-head">
+        <div class="entry-meta">
+          <span class="chip">Read-heavy lookup</span>
+          <span class="level" title="Difficulty: level 2 of 3">Lv 2</span>
+          <time datetime="2026-11-28">28 Nov 2026</time>
+          <span class="read"><span class="read-time">4</span> min read</span>
+        </div>
+        <h2 class="entry-title">Design a reviews and ratings service</h2>
+        <p class="lede">A product page says "4.3 stars from 1,280 reviews", with the newest comments below. Few people write reviews, but everyone reads them.</p>
+        <nav class="steps" aria-label="Sections of this design">
+          <a href="#2026-11-28-reviews-ratings-sec-functional">Features</a>
+          <a href="#2026-11-28-reviews-ratings-sec-nonfunctional">Qualities</a>
+          <a href="#2026-11-28-reviews-ratings-sec-entities">Entities</a>
+          <a href="#2026-11-28-reviews-ratings-sec-api">API</a>
+          <a href="#2026-11-28-reviews-ratings-sec-hld">Design</a>
+          <a href="#2026-11-28-reviews-ratings-sec-deepdives">Deep dives</a>
+          <a href="#2026-11-28-reviews-ratings-sec-tips">Tips</a>
+        </nav>
+      </header>
+
+      <div class="prose">
+        <details class="legend">
+          <summary>Legend <span class="hint">6 terms used below</span></summary>
+          <dl>
+            <div><dt>Unique key</dt><dd>A rule in the database: no two rows may have the same value in these columns. The database refuses the second one.</dd></div>
+            <div><dt>Index</dt><dd>A sorted lookup list, like a book's index. It finds matching rows without reading the whole table.</dd></div>
+            <div><dt>Cache</dt><dd>A small, fast store that keeps recent answers so the database is asked less often.</dd></div>
+            <div><dt>TTL</dt><dd>"Time to live": how long a cached answer may be kept before it is thrown away.</dd></div>
+            <div><dt>API gateway</dt><dd>The single front door that sends each request to the right service.</dd></div>
+            <div><dt>Replica</dt><dd>A live copy of a database. It serves reads and takes over if the main one fails.</dd></div>
+          </dl>
+        </details>
+
+        <section class="sec reveal" id="2026-11-28-reviews-ratings-sec-functional">
+          <h3>Functional requirements</h3>
+          <ul class="reqs">
+            <li>Write a review: 1 to 5 stars and a short text, one per user per product.</li>
+            <li>Read a product's reviews, newest first.</li>
+            <li>See a product's average stars and number of reviews.</li>
+          </ul>
+          <p class="out">Out of scope: photos, replies, "helpful" votes, spam filtering, editing a review.</p>
+        </section>
+
+        <section class="sec reveal" id="2026-11-28-reviews-ratings-sec-nonfunctional">
+          <h3>Non-functional requirements</h3>
+          <ul class="reqs nfr">
+            <li><strong>Fast pages.</strong> Pages are opened far more often than reviews are written, and a slow page loses sales.</li>
+            <li><strong>One review per person.</strong> Duplicates would let one fan pump up a score.</li>
+            <li><strong>Correct average.</strong> The number must match the reviews. A minute of delay is fine.</li>
+            <li><strong>Stays up.</strong> If one machine fails, shoppers still see reviews.</li>
+          </ul>
+        </section>
+
+        <section class="sec reveal" id="2026-11-28-reviews-ratings-sec-entities">
+          <h3>Core entities</h3>
+          <ul class="entities">
+            <li><strong>Review:</strong> who wrote it, for which product, stars, text and time.</li>
+            <li><strong>Rating summary:</strong> per product, the number of reviews and the total of all stars.</li>
+          </ul>
+        </section>
+
+        <section class="sec reveal" id="2026-11-28-reviews-ratings-sec-api">
+          <h3>API design</h3>
+          <div class="api-list">
+            <div class="api">
+              <div class="api-sig"><span class="method">POST</span><code>/products/{id}/reviews</code></div>
+              <p>Add the signed-in user's review. 400 for stars outside 1-5 or text over 2,000 characters, 404 for an unknown product, 409 Conflict if this user already reviewed it.</p>
+              <div class="io">
+                <div><span class="io-l">Request body</span><pre>{ "stars": 5, "text": "Great fit." }</pre></div>
+                <div><span class="io-l">Response 201 Created</span><pre>{ "review_id": "981", "stars": 5,
+  "created_at": "2026-11-28T09:00:00Z" }</pre></div>
+              </div>
+            </div>
+            <div class="api">
+              <div class="api-sig"><span class="method get">GET</span><code>/products/{id}/reviews?cursor=...</code></div>
+              <p>One page of 20 reviews, newest first, plus a cursor for the next page.</p>
+              <div class="io">
+                <div><span class="io-l">Request body</span><pre>(none)</pre></div>
+                <div><span class="io-l">Response 200 OK</span><pre>{ "items": [ { "review_id": "981",
+    "stars": 5, "text": "Great fit." } ],
+  "next_cursor": "..." }</pre></div>
+              </div>
+            </div>
+            <div class="api">
+              <div class="api-sig"><span class="method get">GET</span><code>/products/{id}/rating</code></div>
+              <p>The average and the count.</p>
+              <div class="io">
+                <div><span class="io-l">Request body</span><pre>(none)</pre></div>
+                <div><span class="io-l">Response 200 OK</span><pre>{ "average": 4.3, "count": 1280 }</pre></div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="sec" id="2026-11-28-reviews-ratings-sec-hld">
+          <h3>High-level design</h3>
+          <div class="reveal">
+            <p>Assume 10 million new reviews a month (about 4 a second) and 50 million product views a day (about 600 a second, perhaps 3,000 at peak). Reads win by well over 100 to 1. Servers are identical, keep no data, and sit behind a load balancer.</p>
+            <h4>1. Write a review</h4>
+            <p>Save one row in a reviews table. A <dfn class="term" title="A rule in the database: no two rows may have the same value in these columns. The database refuses the second one.">unique key</dfn> on (product_id, user_id) lets the database itself refuse a second review, which becomes the 409. The review_id comes from a sequence.</p>
+            <h4>2. Read the reviews</h4>
+            <p>Ask for one product's rows, newest first, through an <dfn class="term" title="A sorted lookup list, like a book's index. It finds matching rows without reading the whole table.">index</dfn> on (product_id, created_at). The cursor is the last row's time and id, so the next page starts right after it.</p>
+            <h4>3. Show the average</h4>
+            <p>Averaging 50,000 rows per view is wasteful. Keep one summary row per product with review_count and star_sum, and divide on read. Save the review and update the summary in one database transaction, so they never disagree.</p>
+            <div class="table-scroll">
+              <table class="schema">
+                <caption>Tables: reviews and rating_summary</caption>
+                <thead><tr><th>Column</th><th>Type</th><th>Note</th></tr></thead>
+                <tbody>
+                  <tr><td>reviews.review_id</td><td>bigint</td><td>primary key, from a sequence</td></tr>
+                  <tr><td>reviews.product_id, user_id</td><td>bigint</td><td>unique together: one review per user per product</td></tr>
+                  <tr><td>reviews.stars, text, created_at</td><td>int, text, time</td><td>index on (product_id, created_at) lists the newest</td></tr>
+                  <tr><td>rating_summary.product_id</td><td>bigint</td><td>primary key</td></tr>
+                  <tr><td>rating_summary.review_count, star_sum</td><td>int, int</td><td>average = star_sum / review_count</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <figure class="diagram-fig">
+            <div class="diagram-scroll" tabindex="0" role="group" aria-label="Diagram: simple reviews design. Scrollable on small screens.">
+              <svg class="diagram" viewBox="0 0 760 270" role="img" aria-labelledby="2026-11-28-reviews-ratings-d1-t 2026-11-28-reviews-ratings-d1-d">
+                <title id="2026-11-28-reviews-ratings-d1-t">Simple reviews design</title>
+                <desc id="2026-11-28-reviews-ratings-d1-d">The client sends writes and reads to the app servers. The app servers save reviews in the database and read reviews and the summary back from it. A sign shows the two tables.</desc>
+<g class="d-node grass" style="--i:0"><rect x="10" y="58" width="80" height="60"/><text class="d-text" x="50" y="93" text-anchor="middle">Client</text></g>
+<path class="d-edge" style="--i:1" d="M90 88H200"/><path class="d-arrow" style="--i:1" d="M194 82L202 88L194 94Z"/><path class="d-arrow" style="--i:1" d="M96 82L88 88L96 94Z"/><text class="d-label" style="--i:1" x="145" y="76" text-anchor="middle">POST / GET</text>
+<g class="d-node cmd" style="--i:2"><rect x="200" y="40" width="200" height="96"/><text class="d-text" x="300" y="70" text-anchor="middle">App servers</text><text class="d-item" x="212" y="96">- save review, update sum</text><text class="d-item" x="212" y="116">- read reviews, average</text></g>
+<path class="d-edge" style="--i:3" d="M400 88H560"/><path class="d-arrow" style="--i:3" d="M554 82L562 88L554 94Z"/><path class="d-arrow" style="--i:3" d="M406 82L398 88L406 94Z"/><text class="d-label" style="--i:3" x="480" y="76" text-anchor="middle">save / read</text>
+<g class="d-node chest" style="--i:3"><rect x="560" y="56" width="190" height="64"/><text class="d-text" x="655" y="86" text-anchor="middle">Database</text><text class="d-sub" x="655" y="106" text-anchor="middle">one machine</text></g>
+<path class="d-line" style="--i:3" d="M655 120V150"/>
+<g class="d-note" style="--i:3"><rect x="520" y="150" width="230" height="110"/><text class="d-note-t" x="532" y="170">database tables</text><text class="d-mono" x="532" y="192">reviews  review_id  PK</text><text class="d-mono" x="532" y="210">  unique product+user</text><text class="d-mono" x="532" y="228">rating_summary  product PK</text><text class="d-mono" x="532" y="246">  review_count, star_sum</text></g>
+<rect class="d-packet" x="-6" y="-6" width="12" height="12" opacity="0"><animateMotion dur="8s" begin="1.4s" repeatCount="indefinite" keyPoints="0;1;1" keyTimes="0;.4;1" calcMode="linear" path="M90 88H560"/><animate attributeName="opacity" dur="8s" begin="1.4s" repeatCount="indefinite" values="0;1;1;0;0" keyTimes="0;.02;.38;.4;1"/></rect>
+<rect class="d-packet alt" x="-6" y="-6" width="12" height="12" opacity="0"><animateMotion dur="8s" begin="1.4s" repeatCount="indefinite" keyPoints="0;0;1;1" keyTimes="0;.5;.9;1" calcMode="linear" path="M90 88H560"/><animate attributeName="opacity" dur="8s" begin="1.4s" repeatCount="indefinite" values="0;0;1;1;0;0" keyTimes="0;.5;.51;.89;.9;1"/></rect>
+              </svg>
+            </div>
+            <figcaption>The starting point. Gold = saving a review, cyan = reading. It is correct, but every page view goes to the one database.</figcaption>
+            <button class="replay" type="button" aria-label="Replay diagram animation">Replay</button>
+          </figure>
+
+          <aside class="callout why reveal">
+            <span class="callout-label">Why</span>
+            <p><strong>Why store the sum and the count, not the average?</strong> A new average needs the old count, so it cannot be updated alone. A sum and a count just add.</p>
+          </aside>
+        </section>
+
+        <section class="sec" id="2026-11-28-reviews-ratings-sec-deepdives">
+          <h3>Deep dives</h3>
+          <div class="dive reveal">
+            <h4>How do we keep product pages fast?</h4>
+            <p>At peak, 3,000 reads a second ask for the same popular products again and again.</p>
+            <ol class="options">
+              <li><strong>Read the database every time.</strong> Simple, but it repeats the same work.</li>
+              <li class="pick"><strong>Cache with a short TTL.</strong><span class="pick-tag">Pick</span> Answers come from memory; a little stale.</li>
+              <li><strong>Cache whole pages in a CDN.</strong> Fastest, but harder to clear when a review arrives.</li>
+            </ol>
+            <p>The read service checks a <dfn class="term" title="A small, fast store that keeps recent answers so the database is asked less often.">cache</dfn> first: summary:{id} holds the average and count, page1:{id} holds the newest 20 reviews. Each lives 60 seconds (its <dfn class="term" title="Time to live: how long a cached answer may be kept before it is thrown away.">TTL</dfn>). On a miss it reads a replica and fills the cache. The write service deletes both keys after saving, so authors see their own review at once. If the cache is down, reads fall back to the replica, slower but working.</p>
+          </div>
+
+          <div class="dive reveal">
+            <h4>How do we keep the average right?</h4>
+            <p>Many writers may change one product's numbers.</p>
+            <ol class="options">
+              <li><strong>Average all rows on read.</strong> Always right, but slow for popular products.</li>
+              <li class="pick"><strong>Update the summary in the same transaction.</strong><span class="pick-tag">Pick</span> Always exact, and one cheap row.</li>
+              <li><strong>Queue and a worker.</strong> No contention, but it lags and adds parts.</li>
+            </ol>
+            <p>Overall we write about 4 times a second, so even a hit product sees a few at most, which one row handles. The database makes writers take turns, so no update is lost. The duplicate check always runs on the primary, never on cached data.</p>
+          </div>
+
+          <div class="reveal">
+            <h4>Final design</h4>
+            <p>The dives added a cache and the summary row. An <dfn class="term" title="The single front door that sends each request to the right service.">API gateway</dfn> splits traffic by path: reads outnumber writes by over 100 to 1, so the read service can grow on its own and keep serving cached pages while writes are busy. Cached stars may be a minute old, but duplicates and sums are always decided on the primary. A <dfn class="term" title="A live copy of a database. It serves reads and takes over if the main one fails.">replica</dfn> takes over if the primary fails.</p>
+          </div>
+
+          <figure class="diagram-fig" id="2026-11-28-reviews-ratings-final">
+            <div class="diagram-scroll" tabindex="0" role="group" aria-label="Diagram: the final reviews design. Scrollable on small screens.">
+              <svg class="diagram" viewBox="0 0 760 665" role="img" aria-labelledby="2026-11-28-reviews-ratings-d2-t 2026-11-28-reviews-ratings-d2-d">
+                <title id="2026-11-28-reviews-ratings-d2-t">Final reviews design</title>
+                <desc id="2026-11-28-reviews-ratings-d2-d">The client talks to an API gateway. POST reviews goes to the write service, which checks the review, saves the row and updates the summary in the primary database, then clears the cache keys. GET reviews and GET rating go to the read service, which checks the cache first and reads the replica on a miss. The primary copies writes to the replica. Signs show the two tables, the cache entries and the replica.</desc>
+<g class="d-node grass" style="--i:0"><rect x="10" y="340" width="80" height="60"/><text class="d-text" x="50" y="375" text-anchor="middle">Client</text></g>
+<path class="d-edge" style="--i:1" d="M90 370H110"/><path class="d-arrow" style="--i:1" d="M104 364L112 370L104 376Z"/><path class="d-arrow" style="--i:1" d="M96 364L88 370L96 376Z"/>
+<g class="d-node" style="--i:1"><rect x="110" y="190" width="110" height="376"/><text class="d-text" x="165" y="360" text-anchor="middle">API</text><text class="d-text" x="165" y="378" text-anchor="middle">gateway</text><text class="d-item" x="118" y="406">- one door</text><text class="d-item" x="118" y="426">- by path</text></g>
+<path class="d-edge" style="--i:2" d="M220 215H340"/><path class="d-arrow" style="--i:2" d="M334 209L342 215L334 221Z"/><path class="d-arrow" style="--i:2" d="M226 209L218 215L226 221Z"/><text class="d-label" style="--i:2" x="280" y="205" text-anchor="middle">POST reviews</text>
+<g class="d-node cmd" style="--i:3"><rect x="340" y="190" width="180" height="136"/><text class="d-text" x="430" y="220" text-anchor="middle">Write service</text><text class="d-item" x="352" y="246">- check stars and text</text><text class="d-item" x="352" y="266">- save row, 1 per user</text><text class="d-item" x="352" y="286">- add to count and sum</text><text class="d-item" x="352" y="306">- clear the cache keys</text></g>
+<path class="d-edge" style="--i:4" d="M520 242H590"/><path class="d-arrow" style="--i:4" d="M584 236L592 242L584 248Z"/><text class="d-label" style="--i:4" x="555" y="232" text-anchor="middle">save row</text>
+<g class="d-node chest" style="--i:4"><rect x="590" y="210" width="160" height="64"/><text class="d-text" x="670" y="240" text-anchor="middle">Primary DB</text><text class="d-sub" x="670" y="260" text-anchor="middle">all main data</text></g>
+<path class="d-line" style="--i:4" d="M670 194V210"/>
+<g class="d-note" style="--i:4"><rect x="550" y="4" width="200" height="190"/><text class="d-note-t" x="562" y="24">database tables</text><text class="d-mono" x="562" y="46">reviews  review_id  PK</text><text class="d-mono" x="562" y="64">  product_id, user_id</text><text class="d-mono" x="562" y="82">  UNIQUE together</text><text class="d-mono" x="562" y="100">  stars, text, created_at</text><text class="d-mono" x="562" y="118">  index product,created</text><text class="d-mono" x="562" y="140">rating_summary</text><text class="d-mono" x="562" y="158">  product_id  PK</text><text class="d-mono" x="562" y="176">  review_count, star_sum</text></g>
+<path class="d-edge" style="--i:5" d="M742 274V480"/><path class="d-arrow" style="--i:5" d="M736 472L742 480L748 472Z"/><text class="d-label" style="--i:5" x="728" y="470" text-anchor="end">copies writes</text>
+<path class="d-edge" style="--i:6" d="M430 326V370"/><path class="d-arrow" style="--i:6" d="M424 364L430 372L436 364Z"/><text class="d-label" style="--i:6" x="440" y="352">clear keys</text>
+<g class="d-node gem" style="--i:6"><rect x="355" y="370" width="150" height="60"/><text class="d-text" x="430" y="396" text-anchor="middle">Cache</text><text class="d-sub" x="430" y="416" text-anchor="middle">Redis, in memory</text></g>
+<path class="d-line" style="--i:6" d="M505 400H525"/>
+<g class="d-note" style="--i:6"><rect x="525" y="336" width="200" height="94"/><text class="d-note-t" x="537" y="356">cache entries</text><text class="d-mono" x="537" y="378">summary:{id} -> avg,count</text><text class="d-mono" x="537" y="396">page1:{id} -> 20 reviews</text><text class="d-mono" x="537" y="414">TTL 60 seconds</text></g>
+<path class="d-edge accent" style="--i:7" d="M430 430V470"/><path class="d-arrow accent" style="--i:7" d="M424 438L430 430L436 438Z"/><path class="d-arrow accent" style="--i:7" d="M424 462L430 470L436 462Z"/><text class="d-label" style="--i:7" x="440" y="456">check first</text>
+<path class="d-edge accent" style="--i:8" d="M220 520H340"/><path class="d-arrow accent" style="--i:8" d="M334 514L342 520L334 526Z"/><path class="d-arrow accent" style="--i:8" d="M226 514L218 520L226 526Z"/><text class="d-label" style="--i:8" x="280" y="490" text-anchor="middle">GET reviews</text><text class="d-label" style="--i:8" x="280" y="508" text-anchor="middle">GET rating</text>
+<g class="d-node cmd" style="--i:8"><rect x="340" y="470" width="180" height="96"/><text class="d-text" x="430" y="500" text-anchor="middle">Read service</text><text class="d-item" x="352" y="526">- cache, else replica</text><text class="d-item" x="352" y="546">- list or average</text></g>
+<path class="d-edge accent" style="--i:9" d="M520 520H590"/><path class="d-arrow accent" style="--i:9" d="M584 514L592 520L584 526Z"/><path class="d-arrow accent" style="--i:9" d="M526 514L518 520L526 526Z"/><text class="d-label" style="--i:9" x="555" y="510" text-anchor="middle">on miss</text>
+<g class="d-node chest" style="--i:9"><rect x="590" y="480" width="160" height="84"/><text class="d-text" x="670" y="516" text-anchor="middle">Replica</text><text class="d-sub" x="670" y="536" text-anchor="middle">copy of primary</text></g>
+<path class="d-line" style="--i:9" d="M670 564V580"/>
+<g class="d-note" style="--i:9"><rect x="550" y="580" width="200" height="72"/><text class="d-note-t" x="562" y="600">replica</text><text class="d-mono" x="562" y="622">same two tables</text><text class="d-mono" x="562" y="640">serves reads only</text></g>
+<rect class="d-packet" x="-6" y="-6" width="12" height="12" opacity="0"><animateMotion dur="8s" begin="1.6s" repeatCount="indefinite" keyPoints="0;1;1" keyTimes="0;.4;1" calcMode="linear" path="M90 370H165V215H430V242H590"/><animate attributeName="opacity" dur="8s" begin="1.6s" repeatCount="indefinite" values="0;1;1;0;0" keyTimes="0;.02;.38;.4;1"/></rect>
+<rect class="d-packet alt" x="-6" y="-6" width="12" height="12" opacity="0"><animateMotion dur="8s" begin="1.6s" repeatCount="indefinite" keyPoints="0;0;1;1" keyTimes="0;.48;.85;1" calcMode="linear" path="M90 370H165V520H430V430"/><animate attributeName="opacity" dur="8s" begin="1.6s" repeatCount="indefinite" values="0;0;1;1;0;0" keyTimes="0;.48;.49;.84;.85;1"/></rect>
+              </svg>
+            </div>
+            <figcaption>The complete system. Gold = writing a review: checked, saved with its summary in the primary, then the cache keys are cleared. Cyan = reading, answered from the cache or, on a miss, the replica. The primary copies writes to the replica.</figcaption>
+            <button class="replay" type="button" aria-label="Replay diagram animation">Replay</button>
+          </figure>
+
+          <div class="next reveal">
+            <h4>What you could add next</h4>
+            <ul class="next-list">
+              <li>A queue and worker that update the summary later, if a product gets a burst of reviews.</li>
+              <li>A spam check on each new review, run by a worker.</li>
+              <li>Split the reviews table across databases by product_id once it outgrows one machine.</li>
+            </ul>
+          </div>
+        </section>
+
+        <section class="sec reveal" id="2026-11-28-reviews-ratings-sec-tips">
+          <h3>Interview tips</h3>
+          <dl class="qa">
+            <div><dt>Why not compute AVG() on each view?</dt><dd>It reads every review each time. A stored sum and count make it one row.</dd></div>
+            <div><dt>What if a user edits their stars?</dt><dd>In one transaction, update the row and add (new stars minus old stars) to star_sum.</dd></div>
+            <div><dt>How do you stop fake review floods?</dt><dd>Rate limit writes (429 Too Many Requests) and allow only verified buyers; add spam checks later.</dd></div>
+          </dl>
+          <h4>Common mistakes</h4>
+          <ul class="mistakes">
+            <li>Averaging every review on every page view.</li>
+            <li>Leaving out the unique key, so one user can post twice at the same moment.</li>
+          </ul>
+          <aside class="callout tip">
+            <span class="callout-label">Interview tip</span>
+            <p>State the read to write ratio first. It explains the cache, the replica and the stored summary.</p>
+          </aside>
+          <aside class="callout confidence">
+            <span class="callout-label">Confidence note</span>
+            <p>The traffic numbers and the 60-second TTL are assumptions. Updating the summary through a queue is also a valid answer.</p>
+          </aside>
+        </section>
+
+        <p class="sources">Sources: <a href="https://www.hellointerview.com/learn/system-design/in-a-hurry/delivery">Hello Interview, delivery framework</a>; <a href="https://www.postgresql.org/docs/current/ddl-constraints.html">PostgreSQL documentation, constraints</a>; <a href="https://redis.io/docs/latest/commands/expire/">Redis documentation, EXPIRE</a>; Martin Kleppmann, <em>Designing Data-Intensive Applications</em>. This is a common approach, not a claim about any company's internals.</p>
+      </div>
+    </article>
     <article class="entry" id="2026-11-27-live-scores" data-topic="Live scores" data-domain="Real-time messaging" data-date="2026-11-27" data-level="2">
       <header class="entry-head">
         <div class="entry-meta">
